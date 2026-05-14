@@ -1,6 +1,6 @@
 {
   "name": "@openplaw/openplaw",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Feishu/DingTalk bot management platform with visible cross-bot routing, custom agent auto-discovery, runtime schema patching, and autonomous execution - built on opencode + omo",
   "type": "module",
   "main": "dist/index.js",
@@ -28,8 +28,12 @@
     "@opencode-ai/plugin": "^1.14.48",
     "@opencode-ai/sdk": "^1.14.48",
     "@openplaw/opencode": "^1.0.9",
+    "@openplaw/comment-checker": "0.7.0",
     "hono": "^4.7.0",
     "oh-my-opencode": "^4.0.0"
+  },
+  "overrides": {
+    "@code-yeongyu/comment-checker": "npm:@openplaw/comment-checker@0.7.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
