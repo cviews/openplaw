@@ -10,9 +10,9 @@ set -euo pipefail
 #   2. 检测/安装/更新 @openplaw/openplaw
 #   3. 初始化配置目录
 #   4. 检测/安装 ngrok
-#   5. 启动 openplaw 网关
-#   6. 启动 ngrok 代理网关端口
-#   7. 引导用户配置飞书 Sisyphus 机器人
+#   5. 引导用户配置飞书 Sisyphus 机器人
+#   6. 自动发现机器人所在群聊并让用户选择分配
+#   7. 启动 openplaw 网关 + ngrok 隧道
 #
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/cviews/openplaw/main/setup.sh | bash
@@ -24,7 +24,6 @@ GATEWAY_PORT=3000
 PKG_NAME="@openplaw/openplaw"
 CONFIG_DIR="${OPENMO_CONFIG_HOME:-$HOME/.config/openplaw}"
 DATA_DIR="${OPENMO_HOME:-$HOME/.openplaw}"
-NGROK_CHECK_URL="https://ngrok-agent-download-hook"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -34,6 +33,13 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
+
+APP_ID=""
+APP_SECRET=""
+VERIFICATION_TOKEN=""
+ENCRYPT_KEY=""
+NGROK_PUBLIC_URL=""
+DISCOVERED_GROUPS=""
 
 step_num=0
 step() { step_num=$((step_num + 1)); echo ""; echo "${BOLD}${CYAN}━━━ Step $step_num: $1 ━━━${NC}"; echo ""; }
@@ -196,7 +202,6 @@ install_ngrok() {
   else
     err "ngrok 安装失败"
     tip "请手动安装: https://ngrok.com/download"
-    tip "安装后运行: ngrok config add-authtoken <你的token>"
     return 1
   fi
 }
@@ -239,6 +244,319 @@ check_ngrok_auth() {
   return 1
 }
 
+configure_bot() {
+  local config_file="$CONFIG_DIR/openplaw.json"
+
+  if [ -f "$config_file" ]; then
+    local existing_config
+    existing_config="$(cat "$config_file")"
+    if echo "$existing_config" | python3 -c "import json,sys; d=json.load(sys.stdin); bots=d.get('bots',[]); exit(0 if len(bots)>0 else 1)" 2>/dev/null; then
+      warn "openplaw.json 已有 bot 配置，跳过自动写入"
+      info "你可以在 $config_file 中手动修改"
+      local existing_bot
+      existing_bot="$(echo "$existing_config" | python3 -c "import json,sys; d=json.load(sys.stdin); b=d['bots'][0]; print(f'{b[\"appId\"]}|{b[\"appSecret\"]}')")"
+      if [ -n "$existing_bot" ]; then
+        APP_ID="$(echo "$existing_bot" | cut -d'|' -f1)"
+        APP_SECRET="$(echo "$existing_bot" | cut -d'|' -f2)"
+        info "使用已有 bot 配置: App ID=$APP_ID"
+      fi
+      return 0
+    fi
+  fi
+
+  echo ""
+  echo "${BOLD}${CYAN}━━━ 配置 Sisyphus 飞书机器人 ━━━${NC}"
+  echo ""
+  echo "  需要以下 4 个参数（从飞书开放平台获取）："
+  echo ""
+  echo "  ${CYAN}App ID${NC}              — 应用凭证，飞书开放平台 > 你的应用 > 凭证与基础信息"
+  echo "  ${CYAN}App Secret${NC}          — 应用密钥，同上页面"
+  echo "  ${CYAN}Verification Token${NC}  — 事件订阅验证令牌，飞书开放平台 > 事件与回调 > 事件配置"
+  echo "  ${CYAN}Encrypt Key${NC}         — 事件加密密钥，同上页面"
+  echo ""
+  echo "  ${BOLD}如何获取这些参数？${NC}"
+  echo ""
+  echo "  ${CYAN}1.${NC} 打开飞书开放平台: https://open.feishu.cn/app"
+  echo "  ${CYAN}2.${NC} 创建企业自建应用（或使用已有应用）"
+  echo "  ${CYAN}3.${NC} 进入应用 > 凭证与基础信息 → 复制 App ID 和 App Secret"
+  echo "  ${CYAN}4.${NC} 进入应用 > 事件与回调 > 事件配置 → 复制 Verification Token 和 Encrypt Key"
+  echo "  ${CYAN}5.${NC} 在事件配置页设置请求地址 URL 为:"
+  echo ""
+
+  if [ -n "${NGROK_PUBLIC_URL:-}" ]; then
+    echo "     ${BOLD}${GREEN}${NGROK_PUBLIC_URL}/webhook/feishu${NC}"
+    echo ""
+    echo "     ${DIM}↑ ngrok 为你生成的公网地址${NC}"
+  else
+    echo "     ${BOLD}<你的公网URL>/webhook/feishu${NC}"
+    echo ""
+    echo "     ${DIM}URL 格式: https://xxxx.ngrok-free.app/webhook/feishu${NC}"
+  fi
+
+  echo ""
+  echo "  ${CYAN}6.${NC} 在应用 > 机器人 > 页面启用机器人能力"
+  echo "  ${CYAN}7.${NC} 在应用版本管理与发布 > 创建版本并发布"
+  echo ""
+  echo "  ${DIM}先把机器人添加到你需要它响应的飞书群聊中，下面会自动发现这些群${NC}"
+  echo ""
+
+  read -rp "  ${BOLD}App ID:${NC} " app_id
+  read -rp "  ${BOLD}App Secret:${NC} " app_secret
+  read -rp "  ${BOLD}Verification Token:${NC} " verification_token
+  read -rp "  ${BOLD}Encrypt Key:${NC} " encrypt_key
+
+  APP_ID="$app_id"
+  APP_SECRET="$app_secret"
+  VERIFICATION_TOKEN="$verification_token"
+  ENCRYPT_KEY="$encrypt_key"
+
+  if [ -z "$APP_ID" ] || [ -z "$APP_SECRET" ]; then
+    warn "App ID 或 App Secret 为空，跳过配置写入"
+    tip "你可以稍后手动编辑: $config_file"
+    return 1
+  fi
+}
+
+discover_groups() {
+  if [ -z "$APP_ID" ] || [ -z "$APP_SECRET" ]; then
+    warn "缺少 App ID 或 App Secret，无法自动发现群聊"
+    echo ""
+    echo "  ${BOLD}手动获取 chatId 方法:${NC}"
+    echo ""
+    echo "  ${CYAN}方法 1:${NC} 在飞书群里打开群设置 → 群信息 → 复制群链接"
+    echo "        URL 中 chat_id= 后面的值就是 chatId"
+    echo "        例: https://feishu.cn/group/chat?chat_id=oc_xxxxxabc"
+    echo "        chatId 就是: oc_xxxxxabc"
+    echo ""
+    echo "  ${CYAN}方法 2:${NC} 先启动机器人，在群里发一条消息"
+    echo "        查看 openplaw 日志，日志里会打印 chatId"
+    echo ""
+    DISCOVERED_GROUPS=""
+    return 1
+  fi
+
+  tip "正在通过飞书 API 发现机器人所在群聊..."
+
+  local feishu_token
+  feishu_token="$(curl -s -X POST "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal" \
+    -H "Content-Type: application/json" \
+    -d "{\"app_id\":\"${APP_ID}\",\"app_secret\":\"${APP_SECRET}\"}" 2>/dev/null | \
+    python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('tenant_access_token',''))" 2>/dev/null || echo "")"
+
+  if [ -z "$feishu_token" ]; then
+    err "无法获取飞书 access token（App ID 或 App Secret 可能不正确）"
+    echo ""
+    echo "  ${BOLD}手动获取 chatId 方法:${NC}"
+    echo ""
+    echo "  ${CYAN}方法 1:${NC} 在飞书群里打开群设置 → 群信息 → 复制群链接"
+    echo "        URL 中 chat_id= 后面的值就是 chatId"
+    echo "        例: https://feishu.cn/group/chat?chat_id=oc_xxxxxabc"
+    echo "        chatId 就是: oc_xxxxxabc"
+    echo ""
+    echo "  ${CYAN}方法 2:${NC} 先启动机器人，在群里发一条消息"
+    echo "        查看 openplaw 日志，日志里会打印 chatId"
+    echo ""
+    DISCOVERED_GROUPS=""
+    return 1
+  fi
+
+  local groups_json
+  groups_json="$(curl -s "https://open.feishu.cn/open-apis/im/v1/chats?page_size=100" \
+    -H "Authorization: Bearer ${feishu_token}" 2>/dev/null || echo "")"
+
+  local group_count
+  group_count="$(echo "$groups_json" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    items = d.get('data', {}).get('items', [])
+    print(len(items))
+except:
+    print(0)
+" 2>/dev/null || echo "0")"
+
+  if [ "$group_count" -eq 0 ]; then
+    warn "机器人尚未加入任何群聊"
+    echo ""
+    echo "  ${BOLD}请先把机器人添加到飞书群聊中:${NC}"
+    echo ""
+    echo "  ${CYAN}1.${NC} 在飞书开放平台 > 你的应用 > 机器人 > 启用机器人能力"
+    echo "  ${CYAN}2.${NC} 创建版本并发布应用"
+    echo "  ${CYAN}3.${NC} 在飞书群聊中添加机器人（群设置 → 群机器人 → 添加机器人 → 选择你的应用）"
+    echo "  ${CYAN}4.${NC} 添加完成后，重新运行此脚本，脚本会自动发现群聊"
+    echo ""
+    echo "  ${BOLD}或者手动获取 chatId:${NC}"
+    echo "  飞书群 → 群设置 → 群信息 → 复制群链接 → URL 中 chat_id= 后的值"
+    echo "  例: https://feishu.cn/group/chat?chat_id=oc_xxxxxabc → chatId = oc_xxxxxabc"
+    echo ""
+    DISCOVERED_GROUPS=""
+    return 1
+  fi
+
+  info "发现 $group_count 个群聊"
+  echo ""
+  echo "  ${BOLD}机器人所在的群聊:${NC}"
+  echo ""
+
+  echo "$groups_json" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+items = d.get('data', {}).get('items', [])
+for i, item in enumerate(items, 1):
+    chat_id = item.get('chat_id', '')
+    name = item.get('name', '未命名群')
+    external = '外部群' if item.get('external', False) else '内部群'
+    print(f'  {i}. {name}  ({external})  chatId: {chat_id}')
+"
+
+  DISCOVERED_GROUPS="$(echo "$groups_json" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+items = d.get('data', {}).get('items', [])
+result = []
+for item in items:
+    chat_id = item.get('chat_id', '')
+    name = item.get('name', '')
+    result.append(f'{chat_id}|{name}')
+print('\\n'.join(result))
+" 2>/dev/null || echo "")"
+}
+
+assign_groups() {
+  local config_file="$CONFIG_DIR/openplaw.json"
+
+  if [ -z "$DISCOVERED_GROUPS" ]; then
+    tip "未发现群聊，写入默认配置（chatId 为空，机器人响应所有群）"
+    python3 -c "
+import json, os
+config_file = '$config_file'
+app_id = '$APP_ID'
+app_secret = '$APP_SECRET'
+verification_token = '$VERIFICATION_TOKEN' if '$VERIFICATION_TOKEN' else ''
+encrypt_key = '$ENCRYPT_KEY' if '$ENCRYPT_KEY' else ''
+
+existing = {}
+if os.path.exists(config_file):
+    try:
+        with open(config_file) as f: existing = json.load(f)
+    except: existing = {}
+
+bots = existing.get('bots', [])
+if not any(b.get('id') == 'sisyphus' for b in bots):
+    bots.append({'id': 'sisyphus', 'agent': 'sisyphus', 'appId': app_id, 'appSecret': app_secret, 'verificationToken': verification_token, 'encryptKey': encrypt_key, 'botName': 'SisyphusBot'})
+
+groups = existing.get('groups', [])
+if not any(g.get('id') == 'default' for g in groups):
+    groups.append({'id': 'default', 'chatId': '', 'name': 'default', 'bots': ['sisyphus']})
+
+config = {'bots': bots, 'groups': groups, 'agents': existing.get('agents', {'directory': '~/.openplaw/agents'}), 'mcp': existing.get('mcp', {'autoRegister': True})}
+with open(config_file, 'w') as f: json.dump(config, f, indent=2, ensure_ascii=False); f.write('\n')
+"
+    info "默认配置已写入: $config_file"
+    return 0
+  fi
+
+  echo ""
+  echo "  ${BOLD}选择哪些群聊分配给 Sisyphus 机器人:${NC}"
+  echo ""
+  echo "  ${CYAN}a.${NC} 所有群 → Sisyphus 全部响应"
+  echo "  ${CYAN}s.${NC} 选择特定群 → 只在选中的群里响应"
+  echo "  ${CYAN}n.${NC} 不分配 → chatId 留空（响应所有群，等同 a）"
+  echo ""
+
+  read -rp "  ${BOLD}你的选择 (a/s/n):${NC} " choice
+
+  local selected_chatids=""
+
+  case "$choice" in
+    a|A|n|N|"")
+      selected_chatids=""
+      tip "Sisyphus 将响应所有群聊"
+      ;;
+    s|S)
+      echo ""
+      echo "  ${BOLD}请输入要分配的群聊编号（用逗号分隔，如: 1,3,5）:${NC}"
+      echo ""
+
+      local group_lines
+      group_lines="$(echo "$DISCOVERED_GROUPS" | head -20)"
+      local i=1
+      while IFS= read -r line; do
+        if [ -z "$line" ]; then continue; fi
+        local g_name="$(echo "$line" | cut -d'|' -f2)"
+        local g_id="$(echo "$line" | cut -d'|' -f1)"
+        echo "  ${CYAN}${i}.${NC} ${g_name}  chatId: ${g_id}"
+        i=$((i + 1))
+      done <<< "$group_lines"
+
+      echo ""
+      read -rp "  ${BOLD}编号:${NC} " selected_nums
+
+      selected_chatids="$(echo "$DISCOVERED_GROUPS" | python3 -c "
+import sys
+lines = sys.stdin.read().strip().split('\n')
+nums = [int(x.strip()) for x in '$selected_nums'.split(',') if x.strip()]
+result = []
+for n in nums:
+    if 1 <= n <= len(lines):
+        parts = lines[n-1].split('|')
+        result.append(parts[0])
+print(','.join(result))
+" 2>/dev/null || echo "")"
+      ;;
+    *)
+      warn "无效选择，使用默认配置（响应所有群）"
+      selected_chatids=""
+      ;;
+  esac
+
+  python3 -c "
+import json, os
+config_file = '$config_file'
+app_id = '$APP_ID'
+app_secret = '$APP_SECRET'
+verification_token = '$VERIFICATION_TOKEN' if '$VERIFICATION_TOKEN' else ''
+encrypt_key = '$ENCRYPT_KEY' if '$ENCRYPT_KEY' else ''
+selected = '$selected_chatids'.split(',') if '$selected_chatids' else []
+discovered_lines = '$DISCOVERED_GROUPS'.split('\\n') if '$DISCOVERED_GROUPS' else []
+
+existing = {}
+if os.path.exists(config_file):
+    try:
+        with open(config_file) as f: existing = json.load(f)
+    except: existing = {}
+
+bots = existing.get('bots', [])
+if not any(b.get('id') == 'sisyphus' for b in bots):
+    bots.append({'id': 'sisyphus', 'agent': 'sisyphus', 'appId': app_id, 'appSecret': app_secret, 'verificationToken': verification_token, 'encryptKey': encrypt_key, 'botName': 'SisyphusBot'})
+
+groups = existing.get('groups', [])
+
+if selected:
+    for chat_id in selected:
+        chat_id = chat_id.strip()
+        if not chat_id: continue
+        group_name = '未知群'
+        for line in discovered_lines:
+            parts = line.split('|')
+            if len(parts) >= 2 and parts[0] == chat_id:
+                group_name = parts[1]
+                break
+        group_id = chat_id.replace('oc_', '')
+        if not any(g.get('chatId') == chat_id for g in groups):
+            groups.append({'id': group_id, 'chatId': chat_id, 'name': group_name, 'bots': ['sisyphus']})
+else:
+    if not any(g.get('id') == 'default' for g in groups):
+        groups.append({'id': 'default', 'chatId': '', 'name': 'default', 'bots': ['sisyphus']})
+
+config = {'bots': bots, 'groups': groups, 'agents': existing.get('agents', {'directory': '~/.openplaw/agents'}), 'mcp': existing.get('mcp', {'autoRegister': True})}
+with open(config_file, 'w') as f: json.dump(config, f, indent=2, ensure_ascii=False); f.write('\n')
+print('ok')
+"
+
+  info "群聊配置已写入: $config_file"
+}
+
 start_gateway() {
   tip "正在启动 openplaw 网关 (端口 $GATEWAY_PORT)..."
   openplaw start &
@@ -265,164 +583,28 @@ start_ngrok() {
 
   tip "正在启动 ngrok 隧道 (代理端口 $GATEWAY_PORT)..."
   ngrok http "$GATEWAY_PORT" --log=stdout >/tmp/openplaw-ngrok.log 2>&1 &
-  local ngrok_pid=$!
   sleep 3
 
-  local ngrok_url
-  ngrok_url="$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | python3 -c "
+  NGROK_PUBLIC_URL="$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
-    tunnels = data.get('tunnels', [])
-    for t in tunnels:
-        if t.get('proto') == 'https':
-            print(t['public_url'])
-            break
+    for t in data.get('tunnels', []):
+        if t.get('proto') == 'https': print(t['public_url']); break
 except: pass
 " 2>/dev/null || echo "")"
 
-  if [ -n "$ngrok_url" ]; then
+  if [ -n "$NGROK_PUBLIC_URL" ]; then
     info "ngrok 隧道已启动"
     echo ""
-    echo "  ${BOLD}${GREEN}公网 URL: ${ngrok_url}${NC}"
+    echo "  ${BOLD}${GREEN}公网 URL: ${NGROK_PUBLIC_URL}${NC}"
     echo ""
-    echo "  ${DIM}这是你的飞书机器人回调地址，下面配置时需要用到${NC}"
-    NGROK_PUBLIC_URL="$ngrok_url"
+    echo "  ${DIM}这是你的飞书机器人回调地址${NC}"
     return 0
   else
     warn "无法获取 ngrok 公网 URL"
     tip "请访问 http://127.0.0.1:4040 查看隧道状态"
     return 1
-  fi
-}
-
-write_sisyphus_config() {
-  local config_file="$CONFIG_DIR/openplaw.json"
-  local existing_config
-
-  if [ -f "$config_file" ]; then
-    existing_config="$(cat "$config_file")"
-    if echo "$existing_config" | python3 -c "import json,sys; d=json.load(sys.stdin); bots=d.get('bots',[]); exit(0 if len(bots)>0 else 1)" 2>/dev/null; then
-      warn "openplaw.json 已有 bot 配置，跳过自动写入"
-      info "你可以在 $config_file 中手动修改"
-      return 0
-    fi
-  fi
-
-  echo ""
-  echo "${BOLD}${CYAN}━━━ 配置 Sisyphus 飞书机器人 ━━━${NC}"
-  echo ""
-  echo "  需要以下 4 个参数（从飞书开放平台获取）："
-  echo ""
-  echo "  ${CYAN}App ID${NC}              — 应用凭证，飞书开放平台 > 你的应用 > 凭证与基础信息"
-  echo "  ${CYAN}App Secret${NC}          — 应用密钥，同上页面"
-  echo "  ${CYAN}Verification Token${NC}  — 事件订阅验证令牌，飞书开放平台 > 事件与回调 > 事件配置"
-  echo "  ${CYAN}Encrypt Key${NC}         — 事件加密密钥，同上页面"
-  echo ""
-  echo "  ${DIM}chatId 不需要你填！飞书消息进来时会自动携带群 ID。只有多群多 bot 场景才需要手动配置 chatId。${NC}"
-  echo ""
-  echo "  ${BOLD}如何获取这些参数？${NC}"
-  echo ""
-  echo "  ${CYAN}1.${NC} 打开飞书开放平台: https://open.feishu.cn/app"
-  echo "  ${CYAN}2.${NC} 创建企业自建应用（或使用已有应用）"
-  echo "  ${CYAN}3.${NC} 进入应用 > 凭证与基础信息 → 复制 App ID 和 App Secret"
-  echo "  ${CYAN}4.${NC} 进入应用 > 事件与回调 > 事件配置 → 复制 Verification Token 和 Encrypt Key"
-  echo "  ${CYAN}5.${NC} 在事件配置页设置请求地址 URL 为:"
-  echo ""
-
-  if [ -n "${NGROK_PUBLIC_URL:-}" ]; then
-    echo "     ${BOLD}${GREEN}${NGROK_PUBLIC_URL}/webhook/feishu${NC}"
-    echo ""
-    echo "     ${DIM}↑ 这是 ngrok 为你生成的公网地址${NC}"
-  else
-    echo "     ${BOLD}<你的公网URL>/webhook/feishu${NC}"
-    echo ""
-    echo "     ${DIM}如果你有 ngrok 隧道，URL 格式为: https://xxxx.ngrok-free.app/webhook/feishu${NC}"
-  fi
-
-  echo ""
-  echo "  ${CYAN}6.${NC} 在应用 > 机器人 > 页面启用机器人能力"
-  echo "  ${CYAN}7.${NC} 在应用版本管理与发布 > 创建版本并发布"
-  echo ""
-
-  read -rp "  ${BOLD}App ID:${NC} " app_id
-  read -rp "  ${BOLD}App Secret:${NC} " app_secret
-  read -rp "  ${BOLD}Verification Token:${NC} " verification_token
-  read -rp "  ${BOLD}Encrypt Key:${NC} " encrypt_key
-
-  if [ -z "$app_id" ] || [ -z "$app_secret" ]; then
-    warn "App ID 或 App Secret 为空，跳过配置写入"
-    tip "你可以稍后手动编辑: $config_file"
-    return 1
-  fi
-
-  local webhook_url=""
-  if [ -n "${NGROK_PUBLIC_URL:-}" ]; then
-    webhook_url="${NGROK_PUBLIC_URL}/webhook/feishu"
-  fi
-
-  python3 -c "
-import json, os, sys
-
-config_file = '$config_file'
-app_id = '$app_id'
-app_secret = '$app_secret'
-verification_token = '$verification_token' if '$verification_token' else ''
-encrypt_key = '$encrypt_key' if '$encrypt_key' else ''
-webhook_url = '$webhook_url'
-
-existing = {}
-if os.path.exists(config_file):
-    try:
-        with open(config_file) as f:
-            existing = json.load(f)
-    except:
-        existing = {}
-
-bots = existing.get('bots', [])
-has_sisyphus = any(b.get('id') == 'sisyphus' for b in bots)
-
-if not has_sisyphus:
-    bots.append({
-        'id': 'sisyphus',
-        'agent': 'sisyphus',
-        'appId': app_id,
-        'appSecret': app_secret,
-        'verificationToken': verification_token,
-        'encryptKey': encrypt_key,
-        'botName': 'SisyphusBot'
-    })
-
-groups = existing.get('groups', [])
-has_default = any(g.get('id') == 'default' for g in groups)
-
-if not has_default:
-    groups.append({
-        'id': 'default',
-        'chatId': '',
-        'name': 'default',
-        'bots': ['sisyphus']
-    })
-
-config = {
-    'bots': bots,
-    'groups': groups,
-    'agents': existing.get('agents', {'directory': '~/.openplaw/agents'}),
-    'mcp': existing.get('mcp', {'autoRegister': True}),
-    'session': existing.get('session', {})
-}
-
-with open(config_file, 'w') as f:
-    json.dump(config, f, indent=2, ensure_ascii=False)
-    f.write('\n')
-
-print('ok')
-"
-
-  if [ $? -eq 0 ]; then
-    info "Sisyphus 机器人配置已写入: $config_file"
-  else
-    err "配置写入失败"
   fi
 }
 
@@ -432,55 +614,28 @@ show_summary() {
   echo "${BOLD}${GREEN}║            🎉 openplaw 安装配置完成！                      ║${NC}"
   echo "${BOLD}${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
   echo ""
-  echo "  ${BOLD}配置文件位置:${NC}"
-  echo "    主配置:  $CONFIG_DIR/openplaw.json"
-  echo "    凭证:    $CONFIG_DIR/credentials/"
-  echo "    数据:    $DATA_DIR/"
+  echo "  ${BOLD}配置文件:${NC}"
+  echo "    $CONFIG_DIR/openplaw.json"
   echo ""
   echo "  ${BOLD}常用命令:${NC}"
-  echo "    启动网关:    openplaw start"
-  echo "    查看配置:    openplaw config"
-  echo "    重新初始化:  openplaw init"
-  echo "    管理界面:    openplaw web"
-  echo "    后台运行:    openplaw daemon install && openplaw daemon start"
+  echo "    openplaw start       启动网关"
+  echo "    openplaw config      查看配置"
+  echo "    openplaw init        重新初始化"
+  echo "    openplaw web         管理界面"
   echo ""
 
-  if [ -n "${NGROK_PUBLIC_URL:-}" ]; then
-    echo "  ${BOLD}公网地址:${NC}"
-    echo "    ${GREEN}${NGROK_PUBLIC_URL}/webhook/feishu${NC}"
+  if [ -n "$NGROK_PUBLIC_URL" ]; then
+    echo "  ${BOLD}公网回调 URL:${NC}"
+    echo "    ${CYAN}${NGROK_PUBLIC_URL}/webhook/feishu${NC}"
+    echo ""
+    echo "  ${DIM}在飞书开放平台 > 事件与回调 > 事件配置 中设置此 URL${NC}"
     echo ""
   fi
 
-  echo "  ${BOLD}飞书机器人回调 URL:${NC}"
-  echo "    在飞书开放平台 > 事件与回调 > 事件配置 中设置请求地址为:"
-  if [ -n "${NGROK_PUBLIC_URL:-}" ]; then
-    echo "    ${CYAN}${NGROK_PUBLIC_URL}/webhook/feishu${NC}"
-  else
-    echo "    ${CYAN}<你的公网URL>/webhook/feishu${NC}"
-  fi
-  echo ""
-  echo "  ${BOLD}目录结构说明:${NC}"
-  echo ""
-  echo "    ~/.openplaw/                   数据目录（内置 + 运行时）"
-  echo "      ├── agents/                  内置代理（sisyphus 等）"
-  echo "      ├── mcp/                     内置 MCP 服务配置"
-  echo "      ├── skills/                  内置 skills"
-  echo "      ├── bindings/                会话绑定数据"
-  echo "      ├── sessions/                会话摘要存储"
-  echo "      ├── MEMORY.md                全局记忆文件"
-  echo "      └── logs/                    日志"
-  echo ""
-  echo "    ~/.config/openplaw/            配置目录（用户配置）"
-  echo "      ├── openplaw.json            主配置（bot/group/agent）"
-  echo "      ├── opencode.json            opencode 配置"
-  echo "      ├── omo.json                 omo 配置"
-  echo "      ├── agents/                  用户自定义代理"
-  echo "      ├── mcp/                     用户自定义 MCP"
-  echo "      ├── skills/                  用户自定义 skills"
-  echo "      └── credentials/             飞书凭证文件"
-  echo ""
-  echo "  ${DIM}chatId 不需要手动填写 — 飞书消息会自动携带群 ID${NC}"
-  echo "  ${DIM}如需多群多 bot 配置，chatId 获取方式：飞书群 > 群设置 > 群信息 > 复制群链接 > URL 中 chat_id= 后的值${NC}"
+  echo "  ${BOLD}chatId 获取方式:${NC}"
+  echo "    ${CYAN}自动:${NC} 此脚本已通过飞书 API 自动发现群聊"
+  echo "    ${CYAN}手动:${NC} 飞书群 → 群设置 → 群信息 → 复制群链接 → URL 中 chat_id= 后的值"
+  echo "    ${CYAN}日志:${NC} 启动后群里发消息，openplaw 日志会打印 chatId"
   echo ""
   echo "  ${DIM}详细文档: https://github.com/cviews/openplaw${NC}"
   echo ""
@@ -506,7 +661,11 @@ main() {
   install_ngrok
 
   step "配置飞书 Sisyphus 机器人"
-  write_sisyphus_config
+  configure_bot
+
+  step "自动发现群聊并分配"
+  discover_groups
+  assign_groups
 
   step "启动 openplaw 网关"
   start_gateway
