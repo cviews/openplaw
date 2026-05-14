@@ -1,0 +1,2 @@
+export { ResourceManager, type ResourceSkill, type ResourceCommand, type ResourceMcp, type ResourceAgent, type ProjectContext, type ResourceManagerResult } from "./resource-manager.js";
+export { mountResourceApiRoutes } from "./resource-api.js";

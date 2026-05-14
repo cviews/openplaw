@@ -1,0 +1,26 @@
+{
+  "id": "feishu",
+  "name": "Feishu",
+  "description": "Feishu/Lark enterprise messaging channel",
+  "entry": "./index.ts",
+  "capabilities": {
+    "chatTypes": ["direct", "group", "thread"],
+    "interactive": true,
+    "streaming": true,
+    "threads": true,
+    "textChunkLimit": 4000
+  },
+  "envVars": ["FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_VERIFICATION_TOKEN", "FEISHU_ENCRYPT_KEY"],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "appId": { "type": "string" },
+      "appSecret": { "type": "string" },
+      "verificationToken": { "type": "string" },
+      "encryptKey": { "type": "string" },
+      "botName": { "type": "string" },
+      "port": { "type": "number" }
+    },
+    "required": ["appId", "appSecret"]
+  }
+}

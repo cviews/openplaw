@@ -1,0 +1,28 @@
+# Build output
+dist/
+
+# Agent tool state
+.sisyphus/
+.playwright-mcp/
+agents/
+
+# Reference repos (not part of this project)
+openclaw/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Temp/search results
+github-search-results.md
+
+# Logs
+*.log
+logs/
