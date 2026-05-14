@@ -1,74 +1,105 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 
-import { Script } from "@opencode-ai/script"
-import { $ } from "bun"
-import { fileURLToPath } from "url"
+/**
+ * openplaw publish script — bumps version, builds, and publishes to npm.
+ *
+ * Usage: node script/publish.ts <version> [--dry-run] [--tag <tag>]
+ *
+ * Steps:
+ *   1. Update version in package.json
+ *   2. Run npm run build (tsc)
+ *   3. npm publish --access public --tag <tag>
+ *   4. Git commit + push version bump
+ *
+ * --dry-run: perform steps 1-2 only, skip publish and git push
+ * --tag: npm dist-tag (default: latest)
+ */
 
-console.log("=== publishing ===\n")
+import { execSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const dir = fileURLToPath(new URL("..", import.meta.url))
-process.chdir(dir)
-const tag = `v${Script.version}`
+const dir = dirname(fileURLToPath(import.meta.url));
+const projectDir = resolve(dir, "..");
+const pkgPath = resolve(projectDir, "package.json");
 
-const pkgjsons = await Array.fromAsync(
-  new Bun.Glob("**/package.json").scan({
-    absolute: true,
-  }),
-).then((arr) => arr.filter((x) => !x.includes("node_modules") && !x.includes("dist")))
+function parseArgs(): { version: string; dryRun: boolean; tag: string } {
+  const argv = process.argv.slice(2);
+  const version = argv[0];
+  if (!version) {
+    console.error("Usage: node script/publish.ts <version> [--dry-run] [--tag <tag>]");
+    console.error("Example: node script/publish.ts 0.2.0 --tag beta");
+    process.exit(1);
+  }
+  const dryRun = argv.includes("--dry-run");
+  const tagIdx = argv.indexOf("--tag");
+  const tag = tagIdx >= 0 && argv[tagIdx + 1] ? argv[tagIdx + 1]! : "latest";
+  return { version, dryRun, tag };
+}
 
-async function prepareReleaseFiles() {
-  for (const file of pkgjsons) {
-    let pkg = await Bun.file(file).text()
-    pkg = pkg.replaceAll(/"version": "[^"]+"/g, `"version": "${Script.version}"`)
-    console.log("updated:", file)
-    await Bun.file(file).write(pkg)
+function run(cmd: string, cwd?: string): void {
+  console.log(`  > ${cmd}`);
+  execSync(cmd, { cwd: cwd ?? projectDir, stdio: "inherit" });
+}
+
+function npmViewVersion(name: string, version: string): boolean {
+  try {
+    const result = execSync(`npm view ${name}@${version} version`, {
+      cwd: projectDir,
+      stdio: "pipe",
+      encoding: "utf-8",
+    }).trim();
+    return result === version;
+  } catch {
+    return false;
+  }
+}
+
+async function main(): Promise<void> {
+  const { version, dryRun, tag } = parseArgs();
+
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { name: string; version: string };
+  const pkgName = pkg.name;
+
+  console.log(`\n=== Publishing ${pkgName}@${version} ===\n`);
+
+  // Step 1: Check if already published
+  if (npmViewVersion(pkgName, version)) {
+    console.log(`already published ${pkgName}@${version} — skipping`);
+    process.exit(0);
   }
 
-  const extensionToml = fileURLToPath(new URL("../packages/extensions/zed/extension.toml", import.meta.url))
-  let toml = await Bun.file(extensionToml).text()
-  toml = toml.replace(/^version = "[^"]+"/m, `version = "${Script.version}"`)
-  toml = toml.replaceAll(/releases\/download\/v[^/]+\//g, `releases/download/v${Script.version}/`)
-  console.log("updated:", extensionToml)
-  await Bun.file(extensionToml).write(toml)
+  // Step 2: Bump version in package.json
+  console.log(`\n📌 Step 1: Bump version to ${version}`);
+  pkg.version = version;
+  writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n", "utf-8");
 
-  await $`bun install`
-  await $`./packages/sdk/js/script/build.ts`
+  // Step 3: Build
+  console.log("\n🔨 Step 2: Build (tsc)");
+  run("npm run build");
+
+  if (dryRun) {
+    console.log("\n--- Dry run complete. Skipping publish and git push. ---");
+    console.log(`Version bumped to ${version}, build succeeded.`);
+    process.exit(0);
+  }
+
+  // Step 4: Publish
+  console.log(`\n📦 Step 3: npm publish --tag ${tag}`);
+  run(`npm publish --access public --tag ${tag}`);
+
+  // Step 5: Git commit + push
+  console.log("\n📝 Step 4: git commit + push");
+  run("git add package.json package-lock.json");
+  run(`git commit -m "chore: bump version to ${version}"`);
+  run("git push");
+
+  console.log(`\n✅ Done! ${pkgName}@${version} published to npm`);
+  console.log(`   Install: npm i -g @openplaw/openplaw`);
 }
 
-if (Script.release && !Script.preview) {
-  await $`git fetch origin --tags`
-  await $`git switch --detach`
-}
-
-await prepareReleaseFiles()
-
-console.log("\n=== cli ===\n")
-await $`bun ./packages/opencode/script/publish.ts`
-
-console.log("\n=== sdk ===\n")
-await $`bun ./packages/sdk/js/script/publish.ts`
-
-console.log("\n=== plugin ===\n")
-await $`bun ./packages/plugin/script/publish.ts`
-
-if (Script.release) {
-  await $`bun ./packages/desktop/scripts/finalize-latest-json.ts`
-  await $`bun ./packages/desktop/scripts/finalize-latest-yml.ts`
-}
-
-if (Script.release && !Script.preview) {
-  await $`git commit -am "release: ${tag}"`
-  await $`git tag -d ${tag}`.nothrow()
-  await $`git tag ${tag}`
-  await $`git push origin refs/tags/${tag} --force-with-lease --no-verify`
-  await new Promise((resolve) => setTimeout(resolve, 5_000))
-  await $`git fetch origin`
-  await $`git checkout -B dev origin/dev`
-  await prepareReleaseFiles()
-  await $`git commit -am "sync release versions for ${tag}"`
-  await $`git push origin HEAD:dev --no-verify`
-}
-
-if (Script.release) {
-  await $`gh release edit ${tag} --draft=false --repo ${process.env.GH_REPO}`
-}
+main().catch((err) => {
+  console.error("Publish failed:", err);
+  process.exit(1);
+});

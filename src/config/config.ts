@@ -1,8 +1,8 @@
-import * as os from "node:os";
 import * as path from "node:path";
 import type { SkillMcpConfig } from "../mcp/index.js";
 import type { SessionResetConfig } from "../core/routing/session-binding.js";
 import type { SummaryConfig } from "./session-summary.js";
+import { resolveOpenmoDir, resolveConfigDir } from "./loader.js";
 
 export type OpenmoBotConfig = {
   id: string;
@@ -153,12 +153,15 @@ export function resolveConfig(input?: OpenmoPluginConfig): OpenmoConfig {
     }
   }
 
+  const openplawDir = resolveOpenmoDir();
+  const configDirPath = resolveConfigDir();
+
   return {
     bots,
     groups,
     channels,
     agents: {
-      directory: partial.agents?.directory ?? path.join(os.homedir(), ".openplaw", "agents"),
+      directory: partial.agents?.directory ?? path.join(openplawDir, "agents"),
       botAgentMap: botAgentMap,
     },
     mcp: {
@@ -170,7 +173,7 @@ export function resolveConfig(input?: OpenmoPluginConfig): OpenmoConfig {
       host: DEFAULT_GATEWAY_HOST,
     },
     bindings: {
-      dir: path.join(os.homedir(), ".openplaw", "bindings"),
+      dir: path.join(openplawDir, "bindings"),
       file: DEFAULT_BINDINGS_FILE,
       ttlMs: DEFAULT_BINDINGS_TTL_MS,
     },
@@ -186,6 +189,6 @@ export function resolveConfig(input?: OpenmoPluginConfig): OpenmoConfig {
       },
     },
     verbose: false,
-    configDir: path.join(os.homedir(), ".config", "openplaw"),
+    configDir: configDirPath,
   };
 }

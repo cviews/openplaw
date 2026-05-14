@@ -2,6 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { resolveOpenmoDir } from "../config/loader.js";
 import type {
   GatewayServiceInstallArgs,
   GatewayServiceState,
@@ -14,7 +15,7 @@ const LABEL = "com.openplaw.gateway";
 const PLIST_FILENAME = `${LABEL}.plist`;
 const PLIST_DIR = join(homedir(), "Library", "LaunchAgents");
 const PLIST_PATH = join(PLIST_DIR, PLIST_FILENAME);
-const LOG_DIR = join(homedir(), ".openplaw", "logs");
+const LOG_DIR = join(resolveOpenmoDir(), "logs");
 
 function generatePlist(args: GatewayServiceInstallArgs): string {
   const envEntries = Object.entries(args.env)

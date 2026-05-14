@@ -2,8 +2,8 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { cors } from "hono/cors";
-import * as os from "node:os";
 import path from "node:path";
+import { resolveOpenmoDir, resolveConfigDir } from "../config/loader.js";
 import { logger } from "../infra/logger.js";
 import { createConfigRoutes, type RouteDeps } from "./routes/config-routes.js";
 import { createBotRoutes } from "./routes/bot-routes.js";
@@ -31,8 +31,8 @@ export function createWebServerApp(config: WebServerConfig): Hono {
 
   app.use("/api/*", cors());
 
-  const openplawDir = config.openplawDir ?? path.join(os.homedir(), ".openplaw");
-  const configDir = config.configDir ?? path.join(os.homedir(), ".config", "openplaw");
+  const openplawDir = config.openplawDir ?? resolveOpenmoDir();
+  const configDir = config.configDir ?? resolveConfigDir();
   const deps: RouteDeps = { openplawDir, configDir };
 
   app.route("/api/config", createConfigRoutes(deps));

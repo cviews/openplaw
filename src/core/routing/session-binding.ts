@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
+import { resolveOpenmoDir } from "../../config/loader.js";
 
 export type ConversationRef = {
   channel: string;
@@ -27,7 +27,7 @@ export type SessionBindingRecord = {
   ttlMs: number;                    // backward compat, but reset logic uses daily/idle
 };
 
-const BINDINGS_DIR = path.join(os.homedir(), ".openplaw", "bindings");
+const BINDINGS_DIR = path.join(resolveOpenmoDir(), "bindings");
 const BINDINGS_FILE = path.join(BINDINGS_DIR, "current-conversations.json");
 
 // Next 4:00 AM after sessionStart (or same day if before 4:00 AM)

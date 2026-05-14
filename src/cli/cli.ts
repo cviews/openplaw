@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { startCommand } from "../commands/start.js";
 import { scanCommand } from "../commands/scan.js";
 import { configCommand } from "../commands/config.js";
@@ -7,7 +8,8 @@ import { initCommand, type InitCommandOptions } from "../commands/init.js";
 import { webCommand, type WebCommandOptions } from "../commands/web.js";
 import { logger } from "../infra/logger.js";
 
-const VERSION = "0.1.0";
+const require = createRequire(import.meta.url);
+const VERSION: string = require("../../package.json").version;
 
 function printUsage(): void {
   console.log(`openplaw v${VERSION} — Feishu/DingTalk bot management platform
