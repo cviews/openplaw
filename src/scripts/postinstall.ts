@@ -97,7 +97,7 @@ async function ensureOpenmoDir(): Promise<void> {
     2,
   ) + "\n";
 
-  for (const fileName of ["openplaw.json", "opencode.json", "omo.json"]) {
+  for (const fileName of ["openplaw.json", "opencode.json", "oh-my-openagent.json"]) {
     const filePath = path.join(configDir, fileName);
     if (!existsSync(filePath)) {
       const content = fileName === "openplaw.json" ? DEFAULT_OPENPLAW_CONFIG : "{}\n";

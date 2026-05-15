@@ -5,6 +5,8 @@ import {
 import { createOpencodeClient as createV2OpencodeClient } from "@opencode-ai/sdk/v2";
 import * as child_process from "node:child_process";
 import * as path from "node:path";
+import { resolveConfigDir } from "../config/loader.js";
+import { ensureOpencodeInPath } from "../utils/path.js";
 import { logger } from "../infra/logger.js";
 
 export type OpencodeServerConfig = {
@@ -44,6 +46,10 @@ export class OpencodeServerManager {
     const hostname = this.config.hostname ?? DEFAULT_HOSTNAME;
     this.url = `http://${hostname}:${port}`;
 
+    ensureOpencodeInPath();
+
+    const configDir = resolveConfigDir();
+
     // The child process calls createOpencodeServer internally
     // Resolve from package root so it works both from dist/ (production) and src/ (tsx dev)
     const packageRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
@@ -56,6 +62,7 @@ export class OpencodeServerManager {
       env: {
         ...process.env,
         OPENCODE_CONFIG_CONTENT: configContent,
+        OPENCODE_CONFIG_DIR: configDir,
         OPENCODE_SERVER_PORT: String(port),
         OPENCODE_SERVER_HOSTNAME: hostname,
       },

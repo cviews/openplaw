@@ -1,6 +1,9 @@
 import { createOpencodeServer, type Config } from "@opencode-ai/sdk";
+import { ensureOpencodeInPath } from "../utils/path.js";
 
 async function main(): Promise<void> {
+  ensureOpencodeInPath();
+
   const configContent = process.env.OPENCODE_CONFIG_CONTENT;
   const port = parseInt(process.env.OPENCODE_SERVER_PORT ?? "4096", 10);
   const hostname = process.env.OPENCODE_SERVER_HOSTNAME ?? "localhost";

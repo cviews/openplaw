@@ -89,6 +89,25 @@ async function readJsonFileWithFallback<T>(fileName: string, configDir: string, 
   return readJsonFile<T>(fallbackPath);
 }
 
+async function readOmoConfigWithFallback<T>(configDir: string, fallbackDir: string): Promise<T> {
+  // Prefer oh-my-openagent.json (unified config name), fallback to legacy omo.json
+  const newConfigPath = path.join(configDir, "oh-my-openagent.json");
+  if (existsSync(newConfigPath)) {
+    return readJsonFile<T>(newConfigPath);
+  }
+  const newFallbackPath = path.join(fallbackDir, "oh-my-openagent.json");
+  if (existsSync(newFallbackPath)) {
+    return readJsonFile<T>(newFallbackPath);
+  }
+  // Legacy fallback: omo.json
+  const legacyConfigPath = path.join(configDir, "omo.json");
+  if (existsSync(legacyConfigPath)) {
+    return readJsonFile<T>(legacyConfigPath);
+  }
+  const legacyFallbackPath = path.join(fallbackDir, "omo.json");
+  return readJsonFile<T>(legacyFallbackPath);
+}
+
 /** @deprecated Credentials are now embedded in OpenmoBotConfig. Kept for migration compat. */
 export async function loadCredentials(configDir: string, fallbackDir?: string): Promise<Map<string, ChannelCredentials>> {
   const result = new Map<string, ChannelCredentials>();
@@ -228,7 +247,7 @@ export async function loadOpenmoConfigs(): Promise<LoadedConfigs> {
   const [openplaw, opencode, omo] = await Promise.all([
     readJsonFileWithFallback<OpenmoFileConfig>("openplaw.json", configDir, openplawDir),
     readJsonFileWithFallback<OpencodeFileConfig>("opencode.json", configDir, openplawDir),
-    readJsonFileWithFallback<OmoFileConfig>("omo.json", configDir, openplawDir),
+    readOmoConfigWithFallback<OmoFileConfig>(configDir, openplawDir),
   ]);
 
   const credentials = await loadCredentials(configDir, openplawDir);

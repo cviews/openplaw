@@ -11,7 +11,7 @@ import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import { resolveConfig, type OpenmoPluginConfig } from "../config/config.js";
 import { createOpencodeClient as createV2OpencodeClient } from "@opencode-ai/sdk/v2";
 import { scanCustomAgents, injectCustomAgentsIntoOpencodeConfig, readOmoAgentOverrides } from "../config/agent-loader.js";
-import { expandTildePath } from "../utils/path.js";
+import { expandTildePath, ensureOpencodeInPath } from "../utils/path.js";
 import path from "node:path";
 
 export type WebCommandOptions = {
@@ -36,6 +36,9 @@ async function tryConnectExistingServer(port: number): Promise<OpencodeClient | 
 
 export async function webCommand(options?: WebCommandOptions): Promise<void> {
   logger.info("Starting Openplaw Web UI...");
+
+  process.env["OPENCODE_CONFIG_DIR"] = resolveConfigDir();
+  ensureOpencodeInPath();
 
   bridgeLoggerToWeb();
   const configs = await loadOpenmoConfigs();

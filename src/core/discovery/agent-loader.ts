@@ -46,7 +46,12 @@ export async function scanAgentFiles(): Promise<string[]> {
 
 export async function updateOmoConfig(discoveredPaths: string[]): Promise<void> {
   const configDir = resolveConfigDir();
-  const configPath = path.join(configDir, "omo.json");
+  // Prefer oh-my-openagent.json, fallback to legacy omo.json for reading
+  const newConfigPath = path.join(configDir, "oh-my-openagent.json");
+  const legacyConfigPath = path.join(configDir, "omo.json");
+  const configPath = existsSync(newConfigPath) ? newConfigPath : legacyConfigPath;
+  // Always write to oh-my-openagent.json (unified name)
+  const writePath = path.join(configDir, "oh-my-openagent.json");
 
   if (!existsSync(configDir)) {
     await mkdir(configDir, { recursive: true });
@@ -86,11 +91,11 @@ export async function updateOmoConfig(discoveredPaths: string[]): Promise<void> 
   config["agent_definitions"] = merged;
 
   const content = JSON.stringify(config, null, 2) + "\n";
-  const tmpPath = configPath + ".tmp";
+  const tmpPath = writePath + ".tmp";
 
   try {
     await writeFile(tmpPath, content, "utf-8");
-    await rename(tmpPath, configPath);
+    await rename(tmpPath, writePath);
   } catch (err: unknown) {
     try {
       if (existsSync(tmpPath)) await unlink(tmpPath);

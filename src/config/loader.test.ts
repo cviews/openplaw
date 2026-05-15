@@ -158,7 +158,7 @@ describe("loadOpenmoConfigs", () => {
           }),
         );
       }
-      if (name === "omo.json") {
+      if (name === "omo.json" || name === "oh-my-openagent.json") {
         return Promise.resolve(
           JSON.stringify({ agent_definitions: ["a.md", "b.md"] }),
         );
@@ -244,14 +244,14 @@ describe("loadOpenmoConfigs", () => {
     existsSyncMock.mockReturnValue(true);
     readFileMock.mockImplementation((filePath: string) => {
       const name = path.basename(filePath);
-      if (name === "omo.json") {
+      if (name === "omo.json" || name === "oh-my-openagent.json") {
         return Promise.resolve("not json at all");
       }
       return Promise.resolve("{}");
     });
 
     await expect(loadOpenmoConfigs()).rejects.toThrow(
-      `Corrupt JSON in config file ${path.join(FAKE_CONFIG_DIR, "omo.json")}`,
+      `Corrupt JSON in config file ${path.join(FAKE_CONFIG_DIR, "oh-my-openagent.json")}`,
     );
   });
 
@@ -271,7 +271,7 @@ describe("loadOpenmoConfigs", () => {
   "model": "gpt-4"
 }`);
       }
-      if (name === "omo.json") {
+      if (name === "omo.json" || name === "oh-my-openagent.json") {
         return Promise.resolve(`{
   // agent defs
   "agent_definitions": ["a.md"]

@@ -11,7 +11,7 @@ import { ResourceManager } from "../resource/index.js";
 import { injectProjectSkillsIntoOpencodeConfig, injectProjectMcpIntoOpencodeConfig } from "../config/project-loader.js";
 import type { SkillInfo, GlobalSkillInfo, ProjectMcpEntry } from "../config/project-loader.js";
 import { scanCustomAgents, injectCustomAgentsIntoOpencodeConfig, readOmoAgentOverrides } from "../config/agent-loader.js";
-import { expandTildePath } from "../utils/path.js";
+import { expandTildePath, ensureOpencodeInPath } from "../utils/path.js";
 import { readMemoryFiles, buildMemoryInstructions, type MemoryContent } from "../config/memory-reader.js";
 
 export type StartCommandOptions = {
@@ -25,6 +25,9 @@ export type StartCommandOptions = {
 
 export async function startCommand(options?: StartCommandOptions): Promise<void> {
   logger.info("Starting openplaw...");
+
+  process.env["OPENCODE_CONFIG_DIR"] = resolveConfigDir();
+  ensureOpencodeInPath();
 
   const configs = await loadOpenmoConfigs();
 

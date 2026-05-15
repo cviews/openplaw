@@ -69,7 +69,9 @@ export async function scanCustomAgents(agentsDirs: string | string[]): Promise<L
  */
 export async function readOmoAgentOverrides(configDir?: string): Promise<Record<string, Record<string, unknown>>> {
   const dir = configDir ?? resolveConfigDir();
-  const filePath = path.join(dir, "omo.json");
+  // Prefer oh-my-openagent.json, fallback to legacy omo.json
+  const newPath = path.join(dir, "oh-my-openagent.json");
+  const filePath = existsSync(newPath) ? newPath : path.join(dir, "omo.json");
 
   if (!existsSync(filePath)) return {};
 

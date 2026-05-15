@@ -1,4 +1,5 @@
 import { createOpencodeTui } from "@opencode-ai/sdk/server";
+import type { Config } from "@opencode-ai/sdk";
 import { loadOpenmoConfigs } from "../config/loader.js";
 import { mergeConfig } from "../config/merger.js";
 import { injectConfig } from "../config/injector.js";
@@ -11,7 +12,7 @@ import { scanCustomAgents, injectCustomAgentsIntoOpencodeConfig, readOmoAgentOve
 import { resolveOpenmoDir, resolveConfigDir } from "../config/loader.js";
 import { resolveConfig } from "../config/config.js";
 import type { OpenmoPluginConfig } from "../config/config.js";
-import { expandTildePath } from "../utils/path.js";
+import { expandTildePath, ensureOpencodeInPath } from "../utils/path.js";
 import { readMemoryFiles, buildMemoryInstructions } from "../config/memory-reader.js";
 import path from "node:path";
 
@@ -135,13 +136,15 @@ export async function tuiCommand(options?: TuiCommandOptions): Promise<void> {
 
   const injected = await injectConfig(configs, { ...merged, opencodeConfig: enrichedConfig });
 
-  process.env["OPENCODE_CONFIG_CONTENT"] = injected.configContent;
+  process.env["OPENCODE_CONFIG_DIR"] = injected.opencodeConfigDir;
+  ensureOpencodeInPath();
 
   const tui = createOpencodeTui({
     project: projectPath,
     model: options?.model ?? enrichedConfig.model,
     session: options?.session,
     agent: options?.agent,
+    config: enrichedConfig as Config,
   });
 
   logger.info("TUI launched");

@@ -36,7 +36,7 @@ const GLOBAL_DEFAULT_CONFIGS = [
     content: JSON.stringify({}, null, 2) + "\n",
   },
   {
-    name: "omo.json",
+    name: "oh-my-openagent.json",
     content: JSON.stringify({}, null, 2) + "\n",
   },
 ] as const;

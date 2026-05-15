@@ -119,7 +119,11 @@ export function createConfigRoutes(deps: RouteDeps): Hono {
 
   app.get("/omo", async (c) => {
     try {
-      const config = await readJsonConfigFile(path.join(deps.configDir, "omo.json"));
+      // Prefer oh-my-openagent.json (unified name), fallback to legacy omo.json
+      const newPath = path.join(deps.configDir, "oh-my-openagent.json");
+      const legacyPath = path.join(deps.configDir, "omo.json");
+      const configPath = existsSync(newPath) ? newPath : legacyPath;
+      const config = await readJsonConfigFile(configPath);
       return c.json(config);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -131,7 +135,7 @@ export function createConfigRoutes(deps: RouteDeps): Hono {
   app.put("/omo", async (c) => {
     try {
       const body = await c.req.json<Record<string, unknown>>();
-      await writeJsonConfigFile(path.join(deps.configDir, "omo.json"), body);
+      await writeJsonConfigFile(path.join(deps.configDir, "oh-my-openagent.json"), body);
       return c.json({ ok: true });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
