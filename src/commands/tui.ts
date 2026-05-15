@@ -8,11 +8,12 @@ import { logger } from "../infra/logger.js";
 import type { SkillInfo, GlobalSkillInfo, ProjectMcpEntry } from "../config/project-loader.js";
 import { injectProjectMcpIntoOpencodeConfig } from "../config/project-loader.js";
 import { scanCustomAgents, injectCustomAgentsIntoOpencodeConfig, readOmoAgentOverrides } from "../config/agent-loader.js";
-import { resolveConfigDir } from "../config/loader.js";
+import { resolveOpenmoDir, resolveConfigDir } from "../config/loader.js";
 import { resolveConfig } from "../config/config.js";
 import type { OpenmoPluginConfig } from "../config/config.js";
 import { expandTildePath } from "../utils/path.js";
 import { readMemoryFiles, buildMemoryInstructions } from "../config/memory-reader.js";
+import path from "node:path";
 
 export type TuiCommandOptions = {
   project?: string;
@@ -120,7 +121,8 @@ export async function tuiCommand(options?: TuiCommandOptions): Promise<void> {
   }
 
   const resolvedConfig = resolveConfig(configs.openplaw as OpenmoPluginConfig);
-  const agentsDirs = resolvedConfig.agents.directory.map(expandTildePath);
+  const openplawAgentsDir = expandTildePath(path.join(resolveOpenmoDir(), "agents"));
+  const agentsDirs = [openplawAgentsDir, ...resolvedConfig.agents.directory.map(expandTildePath)];
   const customAgents = await scanCustomAgents(agentsDirs);
   const omoOverrides = await readOmoAgentOverrides(resolveConfigDir());
   enrichedConfig = injectCustomAgentsIntoOpencodeConfig(enrichedConfig, customAgents, omoOverrides);

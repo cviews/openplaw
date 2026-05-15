@@ -2,6 +2,8 @@ import type { PluginInput, PluginOptions, Hooks, PluginModule } from "@opencode-
 
 import { createOpenmoBootstrap } from "./bootstrap/bootstrap.js";
 import { resolveConfig, type OpenmoPluginConfig } from "./config/config.js";
+import { resolveOpenmoDir } from "./config/loader.js";
+import path from "node:path";
 import { createVisibilityHandlers } from "./core/visibility/visibility-hook.js";
 import { createRouteToBotTool } from "./core/routing/route-to-bot.js";
 import { getChannelPlugin } from "./channels/registry.js";
@@ -39,7 +41,7 @@ export async function openplawServerPlugin(
           port?: number;
         }
       | undefined,
-    agentsDir: resolvedConfig.agents.directory[0],
+    agentsDir: path.join(resolveOpenmoDir(), "agents"),
     botName: Object.values(botAgentMap)[0],
     gateway: {
       port: resolvedConfig.gateway.port,

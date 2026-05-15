@@ -9,7 +9,7 @@ describe("resolveConfig", () => {
     expect(config.bots).toEqual([]);
     expect(config.groups).toEqual([]);
     expect(config.channels).toEqual({});
-    expect(config.agents.directory).toEqual([path.join(os.homedir(), ".openplaw", "agents")]);
+    expect(config.agents.directory).toEqual([path.join(os.homedir(), ".config", "openplaw", "agents")]);
     expect(config.agents.botAgentMap).toEqual({});
     expect(config.mcp.servers).toEqual({});
     expect(config.mcp.autoRegister).toBe(true);
@@ -26,7 +26,7 @@ describe("resolveConfig", () => {
     const config = resolveConfig(undefined);
     expect(config.bots).toEqual([]);
     expect(config.channels).toEqual({});
-    expect(config.agents.directory).toEqual([path.join(os.homedir(), ".openplaw", "agents")]);
+    expect(config.agents.directory).toEqual([path.join(os.homedir(), ".config", "openplaw", "agents")]);
     expect(config.verbose).toBe(false);
     expect(config.configDir).toBe(path.join(os.homedir(), ".config", "openplaw"));
   });
@@ -269,14 +269,14 @@ describe("resolveConfig", () => {
 
   it("preserves agents.directory array", () => {
     const config = resolveConfig({
-      agents: { directory: ["~/.openplaw/agents", "./agents"] },
+      agents: { directory: ["~/.config/openplaw/agents", "./agents"] },
     });
-    expect(config.agents.directory).toEqual(["~/.openplaw/agents", "./agents"]);
+    expect(config.agents.directory).toEqual(["~/.config/openplaw/agents", "./agents"]);
   });
 
-  it("defaults agents.directory to [globalDir/agents]", () => {
+  it("defaults agents.directory to [configDir/agents]", () => {
     const config = resolveConfig({});
-    expect(config.agents.directory).toEqual([path.join(os.homedir(), ".openplaw", "agents")]);
+    expect(config.agents.directory).toEqual([path.join(os.homedir(), ".config", "openplaw", "agents")]);
     expect(config.agents.directory.length).toBe(1);
   });
 });

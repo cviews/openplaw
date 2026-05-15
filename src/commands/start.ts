@@ -33,9 +33,10 @@ export async function startCommand(options?: StartCommandOptions): Promise<void>
   const bots: OpenmoBotConfig[] = configs.openplaw.bots ?? [];
   const groups: OpenmoGroupConfig[] = configs.openplaw.groups ?? [];
   const feishuConfig = configs.openplaw.channels?.feishu as FeishuChannelConfig | undefined;
+  const openplawAgentsDir = expandTildePath(path.join(resolveOpenmoDir(), "agents"));
   const agentsDirs = options?.agentsDir
-    ? [expandTildePath(options.agentsDir)]
-    : resolvedConfig.agents.directory.map(expandTildePath);
+    ? [openplawAgentsDir, expandTildePath(options.agentsDir)]
+    : [openplawAgentsDir, ...resolvedConfig.agents.directory.map(expandTildePath)];
   const opencodePort = options?.opencodePort ?? resolvedConfig.ports.opencode;
   const mcpHubPort = options?.hubPort ?? resolvedConfig.ports.hub;
   const gatewayPort = options?.gatewayPort ?? resolvedConfig.gateway.port;

@@ -16,7 +16,7 @@ const GLOBAL_DEFAULT_CONFIGS = [
       {
         bots: [],
         groups: [],
-        agents: { directory: ["~/.openplaw/agents"] },
+        agents: { directory: ["~/.config/openplaw/agents"] },
         mcp: { autoRegister: true },
         ports: {
           gateway: 3000,

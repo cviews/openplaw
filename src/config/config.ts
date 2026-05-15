@@ -118,9 +118,9 @@ export const DEFAULT_WEB_PORT = 4098;
 
 function normalizeAgentsDirectory(
   directory: string | string[] | undefined,
-  openplawDir: string,
+  configDir: string,
 ): string[] {
-  const defaultDir = path.join(openplawDir, "agents");
+  const defaultDir = path.join(configDir, "agents");
   if (directory === undefined) return [defaultDir];
   if (typeof directory === "string") return [directory];
   return directory;
@@ -202,7 +202,7 @@ export function resolveConfig(input?: OpenmoPluginConfig): OpenmoConfig {
     groups,
     channels,
     agents: {
-      directory: normalizeAgentsDirectory(partial.agents?.directory, openplawDir),
+      directory: normalizeAgentsDirectory(partial.agents?.directory, configDirPath),
       botAgentMap: botAgentMap,
     },
     mcp: {
