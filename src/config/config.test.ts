@@ -71,6 +71,69 @@ describe("resolveConfig", () => {
     expect(config.bindings.ttlMs).toBe(86400000);
   });
 
+  it("fills default ports when not provided", () => {
+    const config = resolveConfig({});
+    expect(config.ports).toEqual({
+      health: 9090,
+      opencode: 4096,
+      hub: 4097,
+      web: 4098,
+    });
+  });
+
+  it("reads all ports from config", () => {
+    const config = resolveConfig({
+      ports: {
+        gateway: 8080,
+        gatewayHost: "127.0.0.1",
+        health: 8081,
+        opencode: 5000,
+        hub: 5001,
+        web: 5002,
+      },
+    });
+    expect(config.ports.health).toBe(8081);
+    expect(config.ports.opencode).toBe(5000);
+    expect(config.ports.hub).toBe(5001);
+    expect(config.ports.web).toBe(5002);
+    expect(config.gateway.port).toBe(8080);
+    expect(config.gateway.host).toBe("127.0.0.1");
+  });
+
+  it("reads gateway port from ports.gateway with backward compat", () => {
+    const config = resolveConfig({
+      ports: { gateway: 9000 },
+    });
+    expect(config.gateway.port).toBe(9000);
+  });
+
+  it("falls back to gateway.port when ports.gateway is not set", () => {
+    const config = resolveConfig({
+      gateway: { port: 7000 },
+    });
+    expect(config.gateway.port).toBe(7000);
+    expect(config.ports.health).toBe(9090);
+  });
+
+  it("ports.gateway takes precedence over gateway.port", () => {
+    const config = resolveConfig({
+      ports: { gateway: 9000 },
+      gateway: { port: 7000 },
+    });
+    expect(config.gateway.port).toBe(9000);
+  });
+
+  it("fills partial ports with defaults", () => {
+    const config = resolveConfig({
+      ports: { opencode: 5000 },
+    });
+    expect(config.ports.opencode).toBe(5000);
+    expect(config.ports.health).toBe(9090);
+    expect(config.ports.hub).toBe(4097);
+    expect(config.ports.web).toBe(4098);
+    expect(config.gateway.port).toBe(3000);
+  });
+
   it("reads gateway port and host from config", () => {
     const config = resolveConfig({
       gateway: { port: 8080, host: "127.0.0.1" },

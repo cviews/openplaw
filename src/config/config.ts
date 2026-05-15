@@ -22,6 +22,21 @@ export type OpenmoGroupConfig = {
   project?: string;
 };
 
+export type OpenmoPortsConfig = {
+  /** Gateway webhook port (default: 3000) */
+  gateway?: number;
+  /** Gateway bind host (default: "0.0.0.0") */
+  gatewayHost?: string;
+  /** Health check port (default: 9090) */
+  health?: number;
+  /** OpenCode server port (default: 4096) */
+  opencode?: number;
+  /** MCP hub server port (default: 4097) */
+  hub?: number;
+  /** Web UI port (default: 4098) */
+  web?: number;
+};
+
 export type OpenmoPluginConfig = {
   bots?: OpenmoBotConfig[];
   groups?: OpenmoGroupConfig[];
@@ -40,6 +55,7 @@ export type OpenmoPluginConfig = {
     port?: number;
     host?: string;
   };
+  ports?: OpenmoPortsConfig;
   session?: {
     reset?: {
       daily?: boolean;
@@ -69,6 +85,12 @@ export type OpenmoConfig = {
     port: number;
     host: string;
   };
+  ports: {
+    health: number;
+    opencode: number;
+    hub: number;
+    web: number;
+  };
   bindings: {
     dir: string;
     file: string;
@@ -84,10 +106,14 @@ export type OpenmoConfig = {
   channels: Record<string, unknown>;
 };
 
-const DEFAULT_BINDINGS_FILE = "current-conversations.json";
-const DEFAULT_BINDINGS_TTL_MS = 24 * 60 * 60 * 1000;
-const DEFAULT_GATEWAY_PORT = 3000;
-const DEFAULT_GATEWAY_HOST = "0.0.0.0";
+export const DEFAULT_BINDINGS_FILE = "current-conversations.json";
+export const DEFAULT_BINDINGS_TTL_MS = 24 * 60 * 60 * 1000;
+export const DEFAULT_GATEWAY_PORT = 3000;
+export const DEFAULT_GATEWAY_HOST = "0.0.0.0";
+export const DEFAULT_HEALTH_PORT = 9090;
+export const DEFAULT_OPENCODE_PORT = 4096;
+export const DEFAULT_HUB_PORT = 4097;
+export const DEFAULT_WEB_PORT = 4098;
 
 function convertLegacyChannelsToBotsGroups(
   channels: Record<string, unknown>,
@@ -173,8 +199,14 @@ export function resolveConfig(input?: OpenmoPluginConfig): OpenmoConfig {
       autoRegister: partial.mcp?.autoRegister ?? true,
     },
     gateway: {
-      port: partial.gateway?.port ?? DEFAULT_GATEWAY_PORT,
-      host: partial.gateway?.host ?? DEFAULT_GATEWAY_HOST,
+      port: partial.ports?.gateway ?? partial.gateway?.port ?? DEFAULT_GATEWAY_PORT,
+      host: partial.ports?.gatewayHost ?? partial.gateway?.host ?? DEFAULT_GATEWAY_HOST,
+    },
+    ports: {
+      health: partial.ports?.health ?? DEFAULT_HEALTH_PORT,
+      opencode: partial.ports?.opencode ?? DEFAULT_OPENCODE_PORT,
+      hub: partial.ports?.hub ?? DEFAULT_HUB_PORT,
+      web: partial.ports?.web ?? DEFAULT_WEB_PORT,
     },
     bindings: {
       dir: path.join(openplawDir, "bindings"),

@@ -20,6 +20,7 @@ export type StartCommandOptions = {
   opencodePort?: number;
   hubPort?: number;
   gatewayPort?: number;
+  webPort?: number;
 };
 
 export async function startCommand(options?: StartCommandOptions): Promise<void> {
@@ -33,9 +34,10 @@ export async function startCommand(options?: StartCommandOptions): Promise<void>
   const groups: OpenmoGroupConfig[] = configs.openplaw.groups ?? [];
   const feishuConfig = configs.openplaw.channels?.feishu as FeishuChannelConfig | undefined;
   const agentsDir = expandTildePath(options?.agentsDir ?? configs.openplaw.agents?.directory ?? path.join(resolveOpenmoDir(), "agents"));
-  const opencodePort = options?.opencodePort ?? 4096;
-  const mcpHubPort = options?.hubPort ?? 4097;
+  const opencodePort = options?.opencodePort ?? resolvedConfig.ports.opencode;
+  const mcpHubPort = options?.hubPort ?? resolvedConfig.ports.hub;
   const gatewayPort = options?.gatewayPort ?? resolvedConfig.gateway.port;
+  const healthPort = options?.healthPort ?? resolvedConfig.ports.health;
 
   const merged = mergeConfig(configs);
 
@@ -119,7 +121,7 @@ export async function startCommand(options?: StartCommandOptions): Promise<void>
       groups: groups.length > 0 ? groups : undefined,
       feishu: bots.length === 0 && feishuConfig?.appId ? feishuConfig : undefined,
       agentsDir,
-      healthPort: options?.healthPort ?? 9090,
+      healthPort,
       botName: bots[0]?.botName ?? feishuConfig?.botName ?? "openplaw",
       gateway: { port: gatewayPort },
       mcpHubPort,

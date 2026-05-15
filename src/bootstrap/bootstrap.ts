@@ -35,6 +35,12 @@ import { adaptToMcpServerConfig } from "../mcp/external/mcp-adapter.js";
 import { ResourceManager } from "../resource/index.js";
 import { AgentNameResolver } from "./agent-name-resolver.js";
 import { resolveConfigDir } from "../config/loader.js";
+import {
+  DEFAULT_GATEWAY_PORT,
+  DEFAULT_GATEWAY_HOST,
+  DEFAULT_HEALTH_PORT,
+  DEFAULT_HUB_PORT,
+} from "../config/config.js";
 
 export type BootstrapConfig = {
   bots?: OpenmoBotConfig[];
@@ -146,7 +152,7 @@ export async function createOpenmoBootstrap(config: BootstrapConfig): Promise<Bo
   let hubClient: HubClientResult | null = null;
 
   if (config.opencodeClient) {
-    const hubPort = config.mcpHubPort ?? 4097;
+    const hubPort = config.mcpHubPort ?? DEFAULT_HUB_PORT;
 
     hubServer = await createOpenmoHubServer(hubRegistry, {
       port: hubPort,
@@ -234,8 +240,8 @@ export async function createOpenmoBootstrap(config: BootstrapConfig): Promise<Bo
     });
 
     const ingress = new WebhookIngress({
-      port: config.gateway?.port ?? 3000,
-      host: config.gateway?.host,
+      port: config.gateway?.port ?? DEFAULT_GATEWAY_PORT,
+      host: config.gateway?.host ?? DEFAULT_GATEWAY_HOST,
       mounts: [],
     });
 
@@ -287,7 +293,7 @@ export async function createOpenmoBootstrap(config: BootstrapConfig): Promise<Bo
     });
 
     const healthServer = new HealthCheckServer({
-      port: config.healthPort ?? 9090,
+      port: config.healthPort ?? DEFAULT_HEALTH_PORT,
     });
 
     let heartbeatStop: (() => void) | null = null;
@@ -318,7 +324,7 @@ export async function createOpenmoBootstrap(config: BootstrapConfig): Promise<Bo
       start: async () => {
         logger.info("openplaw starting...");
         await healthServer.start();
-        logger.info(`Health check server on port ${config.healthPort ?? 9090}`);
+        logger.info(`Health check server on port ${config.healthPort ?? DEFAULT_HEALTH_PORT}`);
         ingressRuntime = await ingress.start();
         logger.info(`Gateway listening on port ${ingressRuntime.port}`);
         logger.info("openplaw started");
@@ -430,8 +436,8 @@ export async function createOpenmoBootstrap(config: BootstrapConfig): Promise<Bo
   logger.info(`Registered ${channels.length} channel plugin(s)`);
 
   const ingress = new WebhookIngress({
-    port: config.gateway?.port ?? 3000,
-    host: config.gateway?.host,
+    port: config.gateway?.port ?? DEFAULT_GATEWAY_PORT,
+    host: config.gateway?.host ?? DEFAULT_GATEWAY_HOST,
     mounts: [],
   });
 
@@ -465,7 +471,7 @@ export async function createOpenmoBootstrap(config: BootstrapConfig): Promise<Bo
   });
 
   const healthServer = new HealthCheckServer({
-    port: config.healthPort ?? 9090,
+    port: config.healthPort ?? DEFAULT_HEALTH_PORT,
   });
 
   let heartbeatStop: (() => void) | null = null;
@@ -496,7 +502,7 @@ export async function createOpenmoBootstrap(config: BootstrapConfig): Promise<Bo
     start: async () => {
       logger.info("openplaw starting...");
       await healthServer.start();
-      logger.info(`Health check server on port ${config.healthPort ?? 9090}`);
+      logger.info(`Health check server on port ${config.healthPort ?? DEFAULT_HEALTH_PORT}`);
       ingressRuntime = await ingress.start();
       logger.info(`Gateway listening on port ${ingressRuntime.port}`);
       logger.info("openplaw started");

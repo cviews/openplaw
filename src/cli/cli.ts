@@ -36,19 +36,22 @@ Daemon Subcommands:
   daemon restart    Restart the daemon service
 
 Options:
-  --agents-dir <path>    Path to agents directory
-  --config <path>        Path to config file
-  --health-port <port>   Health check port (default: 9090)
-  --gateway-port <port>  Gateway webhook port (default: 3000)
-  --project <path>       Project directory for TUI (default: cwd)
-  --model <model>        Override model for TUI
-  --session <id>         Resume TUI session
-  --agent <name>         Start TUI with specific agent
-  --port <port>          Web UI port (default: 4098)
-  --host <host>          Web UI host (default: 0.0.0.0)
-  --force                Force overwrite existing config files (for init)
-  --verbose              Enable verbose logging
-  -h, --help             Show this help message
+  --agents-dir <path>        Path to agents directory
+  --config <path>            Path to config file
+  --gateway-port <port>      Gateway webhook port (default: 3000)
+  --health-port <port>       Health check port (default: 9090)
+  --opencode-port <port>     OpenCode server port (default: 4096)
+  --hub-port <port>          MCP hub server port (default: 4097)
+  --web-port <port>          Web UI port (default: 4098)
+  --project <path>           Project directory for TUI (default: cwd)
+  --model <model>            Override model for TUI
+  --session <id>             Resume TUI session
+  --agent <name>             Start TUI with specific agent
+  --port <port>              Web UI port alias (same as --web-port for web command)
+  --host <host>              Web UI host (default: 0.0.0.0)
+  --force                    Force overwrite existing config files (for init)
+  --verbose                  Enable verbose logging
+  -h, --help                 Show this help message
 `);
 }
 
@@ -72,7 +75,7 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
     } else if (arg === "--force") {
       result.force = true;
       i++;
-    } else if (arg === "--agents-dir" || arg === "--config" || arg === "--health-port" || arg === "--gateway-port" || arg === "--project" || arg === "--model" || arg === "--session" || arg === "--agent" || arg === "--port" || arg === "--host") {
+    } else if (arg === "--agents-dir" || arg === "--config" || arg === "--health-port" || arg === "--gateway-port" || arg === "--opencode-port" || arg === "--hub-port" || arg === "--web-port" || arg === "--project" || arg === "--model" || arg === "--session" || arg === "--agent" || arg === "--port" || arg === "--host") {
       const key = arg.slice(2).replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
       const value = argv[i + 1];
       if (value && !value.startsWith("-")) {
@@ -117,10 +120,16 @@ export async function runCli(argv: string[] = process.argv): Promise<void> {
     case "start": {
       const healthPort = typeof args.healthPort === "string" ? Number(args.healthPort) : undefined;
       const gatewayPort = typeof args.gatewayPort === "string" ? Number(args.gatewayPort) : undefined;
+      const opencodePort = typeof args.opencodePort === "string" ? Number(args.opencodePort) : undefined;
+      const hubPort = typeof args.hubPort === "string" ? Number(args.hubPort) : undefined;
+      const webPort = typeof args.webPort === "string" ? Number(args.webPort) : undefined;
       await startCommand({
         agentsDir: typeof args.agentsDir === "string" ? args.agentsDir : undefined,
         healthPort: healthPort && Number.isFinite(healthPort) ? healthPort : undefined,
         gatewayPort: gatewayPort && Number.isFinite(gatewayPort) ? gatewayPort : undefined,
+        opencodePort: opencodePort && Number.isFinite(opencodePort) ? opencodePort : undefined,
+        hubPort: hubPort && Number.isFinite(hubPort) ? hubPort : undefined,
+        webPort: webPort && Number.isFinite(webPort) ? webPort : undefined,
       });
       break;
     }
@@ -176,9 +185,11 @@ export async function runCli(argv: string[] = process.argv): Promise<void> {
       break;
     }
     case "web": {
+      const opencodePort = typeof args.opencodePort === "string" ? Number(args.opencodePort) : undefined;
       const webOptions: WebCommandOptions = {
         port: typeof args.port === "string" ? Number(args.port) : undefined,
         host: typeof args.host === "string" ? args.host : undefined,
+        opencodePort: opencodePort && Number.isFinite(opencodePort) ? opencodePort : undefined,
       };
       await webCommand(webOptions);
       break;

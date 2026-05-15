@@ -8,6 +8,7 @@ import { OpencodeServerManager, type OpencodeServerConfig } from "../server/open
 import { injectProjectSkillsIntoOpencodeConfig, injectProjectMcpIntoOpencodeConfig, type SkillInfo, type GlobalSkillInfo, type ProjectMcpEntry } from "../config/project-loader.js";
 import { setOpencodeClientForWeb } from "../web/routes/chat-routes.js";
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
+import { resolveConfig, type OpenmoPluginConfig } from "../config/config.js";
 import { createOpencodeClient as createV2OpencodeClient } from "@opencode-ai/sdk/v2";
 import { scanCustomAgents, injectCustomAgentsIntoOpencodeConfig, readOmoAgentOverrides } from "../config/agent-loader.js";
 import { expandTildePath } from "../utils/path.js";
@@ -17,6 +18,7 @@ export type WebCommandOptions = {
   port?: number;
   host?: string;
   opencodePort?: number;
+  hubPort?: number;
 };
 
 async function tryConnectExistingServer(port: number): Promise<OpencodeClient | null> {
@@ -82,7 +84,9 @@ export async function webCommand(options?: WebCommandOptions): Promise<void> {
   const omoOverrides = await readOmoAgentOverrides(resolveConfigDir());
   enrichedConfig = injectCustomAgentsIntoOpencodeConfig(enrichedConfig, customAgents, omoOverrides);
 
-  const opencodePort = options?.opencodePort ?? 4096;
+  const resolvedConfig = resolveConfig(configs.openplaw as OpenmoPluginConfig);
+
+  const opencodePort = options?.opencodePort ?? resolvedConfig.ports.opencode;
 
   let opencodeClient: OpencodeClient;
   let opencodeServer: OpencodeServerManager | null = null;
@@ -108,7 +112,7 @@ export async function webCommand(options?: WebCommandOptions): Promise<void> {
   setOpencodeClientForWeb(opencodeClient);
 
   const webConfig: WebServerConfig = {
-    port: options?.port ?? 4098,
+    port: options?.port ?? resolvedConfig.ports.web,
     host: options?.host ?? "0.0.0.0",
     openplawDir,
     configDir: resolveConfigDir(),

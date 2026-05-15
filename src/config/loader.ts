@@ -27,6 +27,14 @@ export type OpenmoFileConfig = {
     port?: number;
     host?: string;
   };
+  ports?: {
+    gateway?: number;
+    gatewayHost?: string;
+    health?: number;
+    opencode?: number;
+    hub?: number;
+    web?: number;
+  };
 };
 
 export type OpencodeFileConfig = {
