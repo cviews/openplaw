@@ -36,6 +36,10 @@ export type OpenmoPluginConfig = {
     servers?: SkillMcpConfig;
     autoRegister?: boolean;
   };
+  gateway?: {
+    port?: number;
+    host?: string;
+  };
   session?: {
     reset?: {
       daily?: boolean;
@@ -169,8 +173,8 @@ export function resolveConfig(input?: OpenmoPluginConfig): OpenmoConfig {
       autoRegister: partial.mcp?.autoRegister ?? true,
     },
     gateway: {
-      port: DEFAULT_GATEWAY_PORT,
-      host: DEFAULT_GATEWAY_HOST,
+      port: partial.gateway?.port ?? DEFAULT_GATEWAY_PORT,
+      host: partial.gateway?.host ?? DEFAULT_GATEWAY_HOST,
     },
     bindings: {
       dir: path.join(openplawDir, "bindings"),

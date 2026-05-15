@@ -71,6 +71,22 @@ describe("resolveConfig", () => {
     expect(config.bindings.ttlMs).toBe(86400000);
   });
 
+  it("reads gateway port and host from config", () => {
+    const config = resolveConfig({
+      gateway: { port: 8080, host: "127.0.0.1" },
+    });
+    expect(config.gateway.port).toBe(8080);
+    expect(config.gateway.host).toBe("127.0.0.1");
+  });
+
+  it("fills default gateway host when only port is provided", () => {
+    const config = resolveConfig({
+      gateway: { port: 5000 },
+    });
+    expect(config.gateway.port).toBe(5000);
+    expect(config.gateway.host).toBe("0.0.0.0");
+  });
+
   it("uses bots/groups when provided (new format takes precedence)", () => {
     const config = resolveConfig({
       bots: [

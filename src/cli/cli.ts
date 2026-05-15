@@ -36,18 +36,19 @@ Daemon Subcommands:
   daemon restart    Restart the daemon service
 
 Options:
-  --agents-dir <path>   Path to agents directory
-  --config <path>       Path to config file
-  --health-port <port>  Health check port (default: 9090)
-  --project <path>      Project directory for TUI (default: cwd)
-  --model <model>       Override model for TUI
-  --session <id>        Resume TUI session
-  --agent <name>        Start TUI with specific agent
-  --port <port>         Web UI port (default: 4098)
-  --host <host>         Web UI host (default: 0.0.0.0)
-  --force               Force overwrite existing config files (for init)
-  --verbose             Enable verbose logging
-  -h, --help            Show this help message
+  --agents-dir <path>    Path to agents directory
+  --config <path>        Path to config file
+  --health-port <port>   Health check port (default: 9090)
+  --gateway-port <port>  Gateway webhook port (default: 3000)
+  --project <path>       Project directory for TUI (default: cwd)
+  --model <model>        Override model for TUI
+  --session <id>         Resume TUI session
+  --agent <name>         Start TUI with specific agent
+  --port <port>          Web UI port (default: 4098)
+  --host <host>          Web UI host (default: 0.0.0.0)
+  --force                Force overwrite existing config files (for init)
+  --verbose              Enable verbose logging
+  -h, --help             Show this help message
 `);
 }
 
@@ -71,7 +72,7 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
     } else if (arg === "--force") {
       result.force = true;
       i++;
-    } else if (arg === "--agents-dir" || arg === "--config" || arg === "--health-port" || arg === "--project" || arg === "--model" || arg === "--session" || arg === "--agent" || arg === "--port" || arg === "--host") {
+    } else if (arg === "--agents-dir" || arg === "--config" || arg === "--health-port" || arg === "--gateway-port" || arg === "--project" || arg === "--model" || arg === "--session" || arg === "--agent" || arg === "--port" || arg === "--host") {
       const key = arg.slice(2).replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
       const value = argv[i + 1];
       if (value && !value.startsWith("-")) {
@@ -115,9 +116,11 @@ export async function runCli(argv: string[] = process.argv): Promise<void> {
   switch (command) {
     case "start": {
       const healthPort = typeof args.healthPort === "string" ? Number(args.healthPort) : undefined;
+      const gatewayPort = typeof args.gatewayPort === "string" ? Number(args.gatewayPort) : undefined;
       await startCommand({
         agentsDir: typeof args.agentsDir === "string" ? args.agentsDir : undefined,
         healthPort: healthPort && Number.isFinite(healthPort) ? healthPort : undefined,
+        gatewayPort: gatewayPort && Number.isFinite(gatewayPort) ? gatewayPort : undefined,
       });
       break;
     }

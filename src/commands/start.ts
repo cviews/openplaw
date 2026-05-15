@@ -4,7 +4,8 @@ import { mergeConfig } from "../config/merger.js";
 import { logger } from "../infra/logger.js";
 import { ServerCoordinator, type ServerCoordinatorConfig } from "../server/index.js";
 import type { Config } from "@opencode-ai/sdk";
-import type { OpenmoBotConfig, OpenmoGroupConfig } from "../config/config.js";
+import type { OpenmoBotConfig, OpenmoGroupConfig, OpenmoPluginConfig } from "../config/config.js";
+import { resolveConfig } from "../config/config.js";
 import path from "node:path";
 import { ResourceManager } from "../resource/index.js";
 import { injectProjectSkillsIntoOpencodeConfig, injectProjectMcpIntoOpencodeConfig } from "../config/project-loader.js";
@@ -18,6 +19,7 @@ export type StartCommandOptions = {
   agentsDir?: string;
   opencodePort?: number;
   hubPort?: number;
+  gatewayPort?: number;
 };
 
 export async function startCommand(options?: StartCommandOptions): Promise<void> {
@@ -25,12 +27,15 @@ export async function startCommand(options?: StartCommandOptions): Promise<void>
 
   const configs = await loadOpenmoConfigs();
 
+  const resolvedConfig = resolveConfig(configs.openplaw as OpenmoPluginConfig);
+
   const bots: OpenmoBotConfig[] = configs.openplaw.bots ?? [];
   const groups: OpenmoGroupConfig[] = configs.openplaw.groups ?? [];
   const feishuConfig = configs.openplaw.channels?.feishu as FeishuChannelConfig | undefined;
   const agentsDir = expandTildePath(options?.agentsDir ?? configs.openplaw.agents?.directory ?? path.join(resolveOpenmoDir(), "agents"));
   const opencodePort = options?.opencodePort ?? 4096;
   const mcpHubPort = options?.hubPort ?? 4097;
+  const gatewayPort = options?.gatewayPort ?? resolvedConfig.gateway.port;
 
   const merged = mergeConfig(configs);
 
@@ -116,7 +121,7 @@ export async function startCommand(options?: StartCommandOptions): Promise<void>
       agentsDir,
       healthPort: options?.healthPort ?? 9090,
       botName: bots[0]?.botName ?? feishuConfig?.botName ?? "openplaw",
-      gateway: { port: 3000 },
+      gateway: { port: gatewayPort },
       mcpHubPort,
     },
   };

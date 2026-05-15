@@ -23,6 +23,10 @@ export type OpenmoFileConfig = {
     servers?: Record<string, unknown>;
     autoRegister?: boolean;
   };
+  gateway?: {
+    port?: number;
+    host?: string;
+  };
 };
 
 export type OpencodeFileConfig = {
