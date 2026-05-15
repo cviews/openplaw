@@ -11,6 +11,14 @@ import path from "node:path";
 import { resolveOpenmoDir, resolveConfigDir } from "../config/loader.js";
 import { loadAgentDefinitions } from "../core/discovery/agent-loader.js";
 import { applySchemaPatch, findOmoDistPath } from "../core/patching/schema-patcher.js";
+import {
+  DEFAULT_GATEWAY_PORT,
+  DEFAULT_GATEWAY_HOST,
+  DEFAULT_HEALTH_PORT,
+  DEFAULT_OPENCODE_PORT,
+  DEFAULT_HUB_PORT,
+  DEFAULT_WEB_PORT,
+} from "../config/config.js";
 
 async function ensureOpenmoDir(): Promise<void> {
   const openplawDir = resolveOpenmoDir();
@@ -70,10 +78,30 @@ async function ensureOpenmoDir(): Promise<void> {
     await writeFile(path.join(configCredentialsDir, ".gitkeep"), "", "utf-8");
   }
 
+  const DEFAULT_OPENPLAW_CONFIG = JSON.stringify(
+    {
+      bots: [],
+      groups: [],
+      agents: { directory: "~/.openplaw/agents" },
+      mcp: { autoRegister: true },
+      ports: {
+        gateway: DEFAULT_GATEWAY_PORT,
+        gatewayHost: DEFAULT_GATEWAY_HOST,
+        health: DEFAULT_HEALTH_PORT,
+        opencode: DEFAULT_OPENCODE_PORT,
+        hub: DEFAULT_HUB_PORT,
+        web: DEFAULT_WEB_PORT,
+      },
+    },
+    null,
+    2,
+  ) + "\n";
+
   for (const fileName of ["openplaw.json", "opencode.json", "omo.json"]) {
     const filePath = path.join(configDir, fileName);
     if (!existsSync(filePath)) {
-      await writeFile(filePath, "{}\n", "utf-8");
+      const content = fileName === "openplaw.json" ? DEFAULT_OPENPLAW_CONFIG : "{}\n";
+      await writeFile(filePath, content, "utf-8");
     }
   }
 }
