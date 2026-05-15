@@ -9,7 +9,7 @@ describe("resolveConfig", () => {
     expect(config.bots).toEqual([]);
     expect(config.groups).toEqual([]);
     expect(config.channels).toEqual({});
-    expect(config.agents.directory).toBe(path.join(os.homedir(), ".openplaw", "agents"));
+    expect(config.agents.directory).toEqual([path.join(os.homedir(), ".openplaw", "agents")]);
     expect(config.agents.botAgentMap).toEqual({});
     expect(config.mcp.servers).toEqual({});
     expect(config.mcp.autoRegister).toBe(true);
@@ -26,7 +26,7 @@ describe("resolveConfig", () => {
     const config = resolveConfig(undefined);
     expect(config.bots).toEqual([]);
     expect(config.channels).toEqual({});
-    expect(config.agents.directory).toBe(path.join(os.homedir(), ".openplaw", "agents"));
+    expect(config.agents.directory).toEqual([path.join(os.homedir(), ".openplaw", "agents")]);
     expect(config.verbose).toBe(false);
     expect(config.configDir).toBe(path.join(os.homedir(), ".config", "openplaw"));
   });
@@ -42,7 +42,7 @@ describe("resolveConfig", () => {
     expect(config.groups.length).toBe(1);
     expect((config.channels.feishu as Record<string, unknown>).appId).toBe("x");
     expect((config.channels.feishu as Record<string, unknown>).appSecret).toBe("y");
-    expect(config.agents.directory).toBe("/custom/agents");
+    expect(config.agents.directory).toEqual(["/custom/agents"]);
     expect(config.agents.botAgentMap).toEqual({ main: "main" });
     expect(config.mcp.servers).toEqual({});
     expect(config.mcp.autoRegister).toBe(true);
@@ -58,7 +58,7 @@ describe("resolveConfig", () => {
     };
     const config = resolveConfig(input);
     expect(config.channels).toEqual({});
-    expect(config.agents.directory).toBe("/my/agents");
+    expect(config.agents.directory).toEqual(["/my/agents"]);
     expect(config.agents.botAgentMap).toEqual({ bot1: "agent1" });
     expect(config.mcp.servers).toEqual({ myserver: { command: "node" } });
     expect(config.mcp.autoRegister).toBe(false);
@@ -258,5 +258,25 @@ describe("resolveConfig", () => {
     });
     expect(config.agents.botAgentMap["custom"]).toBe("CustomBot");
     expect(config.agents.botAgentMap["bot-a"]).toBe("OracleBot");
+  });
+
+  it("normalizes agents.directory string to array", () => {
+    const config = resolveConfig({
+      agents: { directory: "/single/path" },
+    });
+    expect(config.agents.directory).toEqual(["/single/path"]);
+  });
+
+  it("preserves agents.directory array", () => {
+    const config = resolveConfig({
+      agents: { directory: ["~/.openplaw/agents", "./agents"] },
+    });
+    expect(config.agents.directory).toEqual(["~/.openplaw/agents", "./agents"]);
+  });
+
+  it("defaults agents.directory to [globalDir/agents]", () => {
+    const config = resolveConfig({});
+    expect(config.agents.directory).toEqual([path.join(os.homedir(), ".openplaw", "agents")]);
+    expect(config.agents.directory.length).toBe(1);
   });
 });

@@ -18,37 +18,43 @@ export type LoadedAgent = {
  * The prompt.md file contains plain text — no frontmatter, no extra config.
  * The file content IS the agent prompt.
  */
-export async function scanCustomAgents(agentsDir: string): Promise<LoadedAgent[]> {
-  if (!existsSync(agentsDir)) return [];
-
+export async function scanCustomAgents(agentsDirs: string | string[]): Promise<LoadedAgent[]> {
+  const dirs = typeof agentsDirs === "string" ? [agentsDirs] : agentsDirs;
   const agents: LoadedAgent[] = [];
+  const seen = new Set<string>();
 
-  try {
-    const entries = await readdir(agentsDir, { withFileTypes: true });
+  for (const agentsDir of dirs) {
+    if (!existsSync(agentsDir)) continue;
 
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith(".") || entry.name === "node_modules") continue;
+    try {
+      const entries = await readdir(agentsDir, { withFileTypes: true });
 
-      const promptPath = path.join(agentsDir, entry.name, "prompt.md");
-      if (!existsSync(promptPath)) {
-        logger.debug(`Agent "${entry.name}" has no prompt.md, skipping`, { dir: path.join(agentsDir, entry.name) });
-        continue;
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name.startsWith(".") || entry.name === "node_modules") continue;
+        if (seen.has(entry.name)) continue;
+        seen.add(entry.name);
+
+        const promptPath = path.join(agentsDir, entry.name, "prompt.md");
+        if (!existsSync(promptPath)) {
+          logger.debug(`Agent "${entry.name}" has no prompt.md, skipping`, { dir: path.join(agentsDir, entry.name) });
+          continue;
+        }
+
+        const prompt = await readFile(promptPath, "utf-8");
+        if (!prompt.trim()) {
+          logger.warn(`Agent "${entry.name}" has empty prompt.md, skipping`, { path: promptPath });
+          continue;
+        }
+
+        logger.info(`Loaded custom agent: ${entry.name}`, { path: promptPath });
+        agents.push({ name: entry.name, prompt: prompt.trim(), path: promptPath });
       }
-
-      const prompt = await readFile(promptPath, "utf-8");
-      if (!prompt.trim()) {
-        logger.warn(`Agent "${entry.name}" has empty prompt.md, skipping`, { path: promptPath });
-        continue;
-      }
-
-      logger.info(`Loaded custom agent: ${entry.name}`, { path: promptPath });
-      agents.push({ name: entry.name, prompt: prompt.trim(), path: promptPath });
+    } catch (err) {
+      logger.warn("Failed to scan custom agents directory", {
+        dir: agentsDir,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
-  } catch (err) {
-    logger.warn("Failed to scan custom agents directory", {
-      dir: agentsDir,
-      error: err instanceof Error ? err.message : String(err),
-    });
   }
 
   return agents;

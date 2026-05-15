@@ -82,7 +82,7 @@ async function ensureOpenmoDir(): Promise<void> {
     {
       bots: [],
       groups: [],
-      agents: { directory: "~/.openplaw/agents" },
+      agents: { directory: ["~/.openplaw/agents"] },
       mcp: { autoRegister: true },
       ports: {
         gateway: DEFAULT_GATEWAY_PORT,

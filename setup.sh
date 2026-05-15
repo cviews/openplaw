@@ -610,7 +610,7 @@ groups = existing.get('groups', [])
 if not any(g.get('id') == 'default' for g in groups):
     groups.append({'id': 'default', 'chatId': '', 'name': 'default', 'bots': ['sisyphus']})
 
-config = {'bots': bots, 'groups': groups, 'agents': existing.get('agents', {'directory': '~/.openplaw/agents'}), 'mcp': existing.get('mcp', {'autoRegister': True}), 'ports': existing.get('ports', {'gateway': 3000, 'gatewayHost': '0.0.0.0', 'health': 9090, 'opencode': 4096, 'hub': 4097, 'web': 4098})}
+config = {'bots': bots, 'groups': groups, 'agents': existing.get('agents', {'directory': ['~/.openplaw/agents']}), 'mcp': existing.get('mcp', {'autoRegister': True}), 'ports': existing.get('ports', {'gateway': 3000, 'gatewayHost': '0.0.0.0', 'health': 9090, 'opencode': 4096, 'hub': 4097, 'web': 4098})}
 with open(config_file, 'w') as f: json.dump(config, f, indent=2, ensure_ascii=False); f.write('\n')
 "
     info "默认配置已写入: $config_file"
@@ -710,7 +710,7 @@ else:
     if not any(g.get('id') == 'default' for g in groups):
         groups.append({'id': 'default', 'chatId': '', 'name': 'default', 'bots': ['sisyphus']})
 
-config = {'bots': bots, 'groups': groups, 'agents': existing.get('agents', {'directory': '~/.openplaw/agents'}), 'mcp': existing.get('mcp', {'autoRegister': True}), 'ports': existing.get('ports', {'gateway': 3000, 'gatewayHost': '0.0.0.0', 'health': 9090, 'opencode': 4096, 'hub': 4097, 'web': 4098})}
+config = {'bots': bots, 'groups': groups, 'agents': existing.get('agents', {'directory': ['~/.openplaw/agents']}), 'mcp': existing.get('mcp', {'autoRegister': True}), 'ports': existing.get('ports', {'gateway': 3000, 'gatewayHost': '0.0.0.0', 'health': 9090, 'opencode': 4096, 'hub': 4097, 'web': 4098})}
 with open(config_file, 'w') as f: json.dump(config, f, indent=2, ensure_ascii=False); f.write('\n')
 print('ok')
 "

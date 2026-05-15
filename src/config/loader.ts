@@ -15,7 +15,7 @@ export type OpenmoFileConfig = {
   /** @deprecated Use bots/groups instead. Auto-converted to bots/groups. */
   channels?: Record<string, unknown>;
   agents?: {
-    directory?: string;
+    directory?: string | string[];
     /** @deprecated Bot-agent mapping is now derived from OpenmoBotConfig.agent */
     botAgentMap?: Record<string, string>;
   };

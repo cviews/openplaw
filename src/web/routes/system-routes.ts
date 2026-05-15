@@ -57,7 +57,7 @@ export function createSystemRoutes(deps: SystemRouteDeps): Hono {
         bots: bots.length,
         groups: groups.length,
         mcpServers: mcpServers.length,
-        agentsDir: config.agents?.directory ?? "",
+        agentsDir: Array.isArray(config.agents?.directory) ? config.agents.directory : [config.agents?.directory ?? ""],
         uptime: Math.floor((Date.now() - startTime) / 1000),
         projects: projectCount,
         skills: skillsCount,

@@ -79,12 +79,11 @@ export async function webCommand(options?: WebCommandOptions): Promise<void> {
   }
   enrichedConfig = injectProjectMcpIntoOpencodeConfig(enrichedConfig, projectMcpEntries);
 
-  const agentsDir = expandTildePath(configs.openplaw.agents?.directory ?? path.join(openplawDir, "agents"));
-  const customAgents = await scanCustomAgents(agentsDir);
+  const resolvedConfig = resolveConfig(configs.openplaw as OpenmoPluginConfig);
+  const agentsDirs = resolvedConfig.agents.directory.map(expandTildePath);
+  const customAgents = await scanCustomAgents(agentsDirs);
   const omoOverrides = await readOmoAgentOverrides(resolveConfigDir());
   enrichedConfig = injectCustomAgentsIntoOpencodeConfig(enrichedConfig, customAgents, omoOverrides);
-
-  const resolvedConfig = resolveConfig(configs.openplaw as OpenmoPluginConfig);
 
   const opencodePort = options?.opencodePort ?? resolvedConfig.ports.opencode;
 

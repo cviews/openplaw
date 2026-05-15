@@ -39,7 +39,7 @@ export async function openplawServerPlugin(
           port?: number;
         }
       | undefined,
-    agentsDir: resolvedConfig.agents.directory,
+    agentsDir: resolvedConfig.agents.directory[0],
     botName: Object.values(botAgentMap)[0],
     gateway: {
       port: resolvedConfig.gateway.port,

@@ -33,7 +33,9 @@ export async function startCommand(options?: StartCommandOptions): Promise<void>
   const bots: OpenmoBotConfig[] = configs.openplaw.bots ?? [];
   const groups: OpenmoGroupConfig[] = configs.openplaw.groups ?? [];
   const feishuConfig = configs.openplaw.channels?.feishu as FeishuChannelConfig | undefined;
-  const agentsDir = expandTildePath(options?.agentsDir ?? configs.openplaw.agents?.directory ?? path.join(resolveOpenmoDir(), "agents"));
+  const agentsDirs = options?.agentsDir
+    ? [expandTildePath(options.agentsDir)]
+    : resolvedConfig.agents.directory.map(expandTildePath);
   const opencodePort = options?.opencodePort ?? resolvedConfig.ports.opencode;
   const mcpHubPort = options?.hubPort ?? resolvedConfig.ports.hub;
   const gatewayPort = options?.gatewayPort ?? resolvedConfig.gateway.port;
@@ -90,7 +92,7 @@ export async function startCommand(options?: StartCommandOptions): Promise<void>
 
   enrichedConfig = injectProjectMcpIntoOpencodeConfig(enrichedConfig, projectMcpEntries);
 
-  const customAgents = await scanCustomAgents(agentsDir);
+  const customAgents = await scanCustomAgents(agentsDirs);
   const omoOverrides = await readOmoAgentOverrides(resolveConfigDir());
   enrichedConfig = injectCustomAgentsIntoOpencodeConfig(enrichedConfig, customAgents, omoOverrides);
 
@@ -120,7 +122,7 @@ export async function startCommand(options?: StartCommandOptions): Promise<void>
       bots: bots.length > 0 ? bots : undefined,
       groups: groups.length > 0 ? groups : undefined,
       feishu: bots.length === 0 && feishuConfig?.appId ? feishuConfig : undefined,
-      agentsDir,
+      agentsDir: agentsDirs[0],
       healthPort,
       botName: bots[0]?.botName ?? feishuConfig?.botName ?? "openplaw",
       gateway: { port: gatewayPort },

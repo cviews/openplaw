@@ -43,7 +43,8 @@ export type OpenmoPluginConfig = {
   /** @deprecated Use bots/groups instead. Auto-converted to bots/groups. */
   channels?: Record<string, unknown>;
   agents?: {
-    directory?: string;
+    /** Agent scan directories. String for single dir (backward compat), string[] for multiple dirs. */
+    directory?: string | string[];
     /** @deprecated Bot-agent mapping is now derived from OpenmoBotConfig.agent */
     botAgentMap?: Record<string, string>;
   };
@@ -73,7 +74,7 @@ export type OpenmoConfig = {
   bots: OpenmoBotConfig[];
   groups: OpenmoGroupConfig[];
   agents: {
-    directory: string;
+    directory: string[];
     /** @deprecated Derived from bots for backward compat during migration */
     botAgentMap: Record<string, string>;
   };
@@ -114,6 +115,16 @@ export const DEFAULT_HEALTH_PORT = 9090;
 export const DEFAULT_OPENCODE_PORT = 4096;
 export const DEFAULT_HUB_PORT = 4097;
 export const DEFAULT_WEB_PORT = 4098;
+
+function normalizeAgentsDirectory(
+  directory: string | string[] | undefined,
+  openplawDir: string,
+): string[] {
+  const defaultDir = path.join(openplawDir, "agents");
+  if (directory === undefined) return [defaultDir];
+  if (typeof directory === "string") return [directory];
+  return directory;
+}
 
 function convertLegacyChannelsToBotsGroups(
   channels: Record<string, unknown>,
@@ -191,7 +202,7 @@ export function resolveConfig(input?: OpenmoPluginConfig): OpenmoConfig {
     groups,
     channels,
     agents: {
-      directory: partial.agents?.directory ?? path.join(openplawDir, "agents"),
+      directory: normalizeAgentsDirectory(partial.agents?.directory, openplawDir),
       botAgentMap: botAgentMap,
     },
     mcp: {

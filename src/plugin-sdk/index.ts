@@ -42,7 +42,8 @@ export type OpenmoPluginModule = {
 
 export function createOpenmoPlugin(deps: OpenmoRuntimeDeps, config?: OpenmoPluginConfig): Plugin {
   return async (input: PluginInput, _options?: Record<string, unknown>): Promise<Hooks> => {
-    const agentsDir = config?.agents?.directory ?? `${input.directory}/agents`;
+    const agentsDirRaw = config?.agents?.directory ?? `${input.directory}/agents`;
+    const agentsDir = typeof agentsDirRaw === "string" ? agentsDirRaw : agentsDirRaw[0];
     const botAgentMap = config?.agents?.botAgentMap ?? {};
 
     const mcpRegistry = new OpenmoMcpRegistry({
