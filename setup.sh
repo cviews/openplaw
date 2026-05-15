@@ -9,10 +9,11 @@ set -euo pipefail
 #   1. 检测/安装 Node.js (>=22)
 #   2. 检测/安装/更新 @openplaw/openplaw
 #   3. 初始化配置目录
-#   4. 检测/安装 ngrok
-#   5. 引导用户配置飞书 Sisyphus 机器人
-#   6. 自动发现机器人所在群聊并让用户选择分配
-#   7. 启动 openplaw 网关 + ngrok 隧道
+#   4. 复制配置模板（动态检测脚本目录，不覆盖已有配置，敏感文件需确认）
+#   5. 检测/安装 ngrok
+#   6. 引导用户配置飞书 Sisyphus 机器人
+#   7. 自动发现机器人所在群聊并让用户选择分配
+#   8. 启动 openplaw 网关 + ngrok 隧道
 #
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/cviews/openplaw/main/setup.sh | bash
@@ -156,6 +157,166 @@ init_config() {
       [ ! -f "$CONFIG_DIR/$f" ] && echo '{}' > "$CONFIG_DIR/$f"
     done
     info "配置目录已手动创建"
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 从脚本所在目录的 config/ 子目录复制配置模板到 ~/.config/openplaw/
+# 规则：
+#   - JSON 文件：已有则不覆盖（保留用户现有配置）
+#   - 敏感文件（含 apiKey/appSecret/verificationToken/encryptKey）：已有则提示确认是否覆盖
+#   - skills/mcp/credentials 子目录：内容合并（不删除用户已有的文件）
+# ═══════════════════════════════════════════════════════════════════════════
+
+is_sensitive_file() {
+  local file="$1"
+  if [ ! -f "$file" ]; then
+    return 1
+  fi
+  grep -qiE '(apiKey|appSecret|verificationToken|encryptKey|AUTHTOKEN|PASSWORD|SECRET_KEY|ACCESS_TOKEN)' "$file" 2>/dev/null
+}
+
+copy_config() {
+  local SCRIPT_DIR
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local TEMPLATE_DIR="$SCRIPT_DIR/config"
+
+  if [ ! -d "$TEMPLATE_DIR" ]; then
+    warn "未找到配置模板目录 ($TEMPLATE_DIR)，跳过配置复制"
+    tip "如果你是从 npm 安装的，配置模板不包含在 npm 包中"
+    return 0
+  fi
+
+  info "检测到配置模板目录: $TEMPLATE_DIR"
+  mkdir -p "$CONFIG_DIR"
+
+  local copied=0 skipped=0
+
+  # ── 复制顶层 JSON 配置文件 ──
+  for src_file in "$TEMPLATE_DIR"/*.json; do
+    [ ! -f "$src_file" ] && continue
+    local filename="$(basename "$src_file")"
+    local dest_file="$CONFIG_DIR/$filename"
+
+    if [ -f "$dest_file" ]; then
+      # 目标已存在 → 判断是否敏感
+      if is_sensitive_file "$dest_file"; then
+        echo ""
+        echo "  ${YELLOW}⚠ 发现敏感配置文件: ${filename}${NC}"
+        echo "  ${DIM}该文件包含 apiKey/appSecret 等敏感信息，覆盖可能导致已有凭证丢失${NC}"
+        echo ""
+        read -rp "  ${BOLD}是否覆盖 ${filename}? (y/N):${NC} " overwrite
+        if [ "$overwrite" = "y" ] || [ "$overwrite" = "Y" ]; then
+          cp "$src_file" "$dest_file"
+          info "已覆盖: $filename (用户确认)"
+          copied=$((copied + 1))
+        else
+          info "已跳过: $filename (保留用户现有配置)"
+          skipped=$((skipped + 1))
+        fi
+      else
+        # 非敏感 JSON → 不覆盖，保留用户配置
+        info "已跳过: $filename (已有配置，不覆盖)"
+        skipped=$((skipped + 1))
+      fi
+    else
+      # 目标不存在 → 直接复制
+      cp "$src_file" "$dest_file"
+      if is_sensitive_file "$dest_file"; then
+        warn "已复制: $filename (⚠ 含敏感信息，请检查并替换为你自己的凭证)"
+      else
+        info "已复制: $filename"
+      fi
+      copied=$((copied + 1))
+    fi
+  done
+
+  # ── 合并子目录内容（skills/mcp/credentials）──
+  for subdir in skills mcp credentials; do
+    local src_subdir="$TEMPLATE_DIR/$subdir"
+    [ ! -d "$src_subdir" ] && continue
+    local dest_subdir="$CONFIG_DIR/$subdir"
+    mkdir -p "$dest_subdir"
+
+    # 递归复制子目录内容
+    for src_item in "$src_subdir"/*; do
+      [ ! -e "$src_item" ] && continue
+      local item_name="$(basename "$src_item")"
+      local dest_item="$dest_subdir/$item_name"
+
+      if [ -d "$src_item" ]; then
+        # 子目录（如 skills/submit-code/） → 合并
+        if [ -d "$dest_item" ]; then
+          # 目标子目录已存在 → 逐文件合并
+          for src_inner in "$src_item"/*; do
+            [ ! -f "$src_inner" ] && continue
+            local inner_name="$(basename "$src_inner")"
+            local dest_inner="$dest_item/$inner_name"
+            if [ -f "$dest_inner" ]; then
+              if is_sensitive_file "$dest_inner"; then
+                echo ""
+                echo "  ${YELLOW}⚠ 发现敏感文件: ${subdir}/${item_name}/${inner_name}${NC}"
+                read -rp "  ${BOLD}是否覆盖? (y/N):${NC} " overwrite_inner
+                if [ "$overwrite_inner" = "y" ] || [ "$overwrite_inner" = "Y" ]; then
+                  cp "$src_inner" "$dest_inner"
+                  copied=$((copied + 1))
+                else
+                  skipped=$((skipped + 1))
+                fi
+              else
+                info "已跳过: $subdir/$item_name/$inner_name (已有，不覆盖)"
+                skipped=$((skipped + 1))
+              fi
+            else
+              cp "$src_inner" "$dest_inner"
+              if is_sensitive_file "$dest_inner"; then
+                warn "已复制: $subdir/$item_name/$inner_name (⚠ 含敏感信息)"
+              else
+                info "已复制: $subdir/$item_name/$inner_name"
+              fi
+              copied=$((copied + 1))
+            fi
+          done
+        else
+          # 目标子目录不存在 → 整目录复制
+          cp -r "$src_item" "$dest_item"
+          info "已复制目录: $subdir/$item_name/"
+          copied=$((copied + 1))
+        fi
+      elif [ -f "$src_item" ]; then
+        # 普通文件 → 判断是否覆盖
+        if [ -f "$dest_item" ]; then
+          if is_sensitive_file "$dest_item"; then
+            echo ""
+            echo "  ${YELLOW}⚠ 发现敏感文件: ${subdir}/${item_name}${NC}"
+            read -rp "  ${BOLD}是否覆盖? (y/N):${NC} " overwrite_file
+            if [ "$overwrite_file" = "y" ] || [ "$overwrite_file" = "Y" ]; then
+              cp "$src_item" "$dest_item"
+              copied=$((copied + 1))
+            else
+              skipped=$((skipped + 1))
+            fi
+          else
+            # .gitkeep 等文件 → 不覆盖已有
+            info "已跳过: $subdir/$item_name (已有，不覆盖)"
+            skipped=$((skipped + 1))
+          fi
+        else
+          cp "$src_item" "$dest_item"
+          if is_sensitive_file "$dest_item"; then
+            warn "已复制: $subdir/$item_name (⚠ 含敏感信息)"
+          else
+            info "已复制: $subdir/$item_name"
+          fi
+          copied=$((copied + 1))
+        fi
+      fi
+    done
+  done
+
+  echo ""
+  if [ "$copied" -gt 0 ] || [ "$skipped" -gt 0 ]; then
+    info "配置复制完成: ${copied} 个文件复制, ${skipped} 个文件跳过"
   fi
 }
 
@@ -656,6 +817,9 @@ main() {
 
   step "初始化配置目录"
   init_config
+
+  step "复制配置模板"
+  copy_config
 
   step "安装 ngrok"
   install_ngrok
