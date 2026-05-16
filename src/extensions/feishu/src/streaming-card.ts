@@ -1,7 +1,15 @@
 import * as lark from "@larksuiteoapi/node-sdk";
+import { Agent as UndiciAgent, fetch as undiciFetch } from "undici";
 
-const STREAMING_UPDATE_THROTTLE_MS = 160;
-const STREAMING_SIGNIFICANT_DELTA_CHARS = 18;
+const STREAMING_UPDATE_THROTTLE_MS = 50;
+const STREAMING_SIGNIFICANT_DELTA_CHARS = 2;
+
+const feishuHttpAgent = new UndiciAgent({
+  connections: 6,
+  pipelining: 1,
+  keepAliveTimeout: 60_000,
+  keepAliveMaxTimeout: 600_000,
+});
 
 export type FeishuStreamingConfig = {
   appId: string;
@@ -21,20 +29,18 @@ type StreamingCardOptions = {
 };
 
 const tokenCache = new Map<string, { token: string; expiresAt: number }>();
+let tokenRefreshMutex: Promise<string> | null = null;
 
-async function getTenantToken(creds: FeishuStreamingConfig): Promise<string> {
+async function refreshTokenInternal(creds: FeishuStreamingConfig): Promise<string> {
   const key = creds.appId;
-  const cached = tokenCache.get(key);
-  if (cached && cached.expiresAt > Date.now() + 60_000) {
-    return cached.token;
-  }
 
-  const response = await fetch(
+  const response = await undiciFetch(
     "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ app_id: creds.appId, app_secret: creds.appSecret }),
+      dispatcher: feishuHttpAgent,
     },
   );
 
@@ -59,6 +65,31 @@ async function getTenantToken(creds: FeishuStreamingConfig): Promise<string> {
   });
 
   return data.tenant_access_token;
+}
+
+async function getTenantToken(creds: FeishuStreamingConfig): Promise<string> {
+  const key = creds.appId;
+  const cached = tokenCache.get(key);
+  if (cached && cached.expiresAt > Date.now() + 60_000) {
+    return cached.token;
+  }
+
+  if (tokenRefreshMutex) {
+    return tokenRefreshMutex;
+  }
+
+  const refreshStart = Date.now();
+  tokenRefreshMutex = refreshTokenInternal(creds);
+  try {
+    const token = await tokenRefreshMutex;
+    const elapsed = Date.now() - refreshStart;
+    if (elapsed > 50) {
+      console.log(`[feishu-streaming-timing] token refresh: ${elapsed}ms`);
+    }
+    return token;
+  } finally {
+    tokenRefreshMutex = null;
+  }
 }
 
 function truncateSummary(text: string, max = 50): string {
@@ -104,18 +135,24 @@ export class FeishuStreamingSession {
   private client: lark.Client;
   private creds: FeishuStreamingConfig;
   private state: CardState | null = null;
-  private queue: Promise<void> = Promise.resolve();
   private closed = false;
   private log?: (msg: string) => void;
   private lastUpdateTime = 0;
   private pendingText: string | null = null;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private updateThrottleMs = STREAMING_UPDATE_THROTTLE_MS;
+  /** In-flight concurrent API requests — tracked so close() can drain them before finalising. */
+  private inFlight = new Set<Promise<void>>();
 
   constructor(client: lark.Client, creds: FeishuStreamingConfig, log?: (msg: string) => void) {
     this.client = client;
     this.creds = creds;
     this.log = log;
+  }
+
+  async warmTokenCache(): Promise<void> {
+    await getTenantToken(this.creds);
+    this.log?.("Token cache pre-warmed");
   }
 
   async start(
@@ -132,6 +169,7 @@ export class FeishuStreamingSession {
 
     const elements: Record<string, unknown>[] = [
       { tag: "markdown", content: "⏳ Thinking...", element_id: "content" },
+      { tag: "markdown", content: "", element_id: "loading" },
     ];
     if (options?.note) {
       elements.push({ tag: "hr" });
@@ -149,7 +187,7 @@ export class FeishuStreamingSession {
         update_multi: true,
         summary: { content: "[Generating...]" },
         streaming_config: {
-          print_frequency_ms: { default: 70 },
+          print_frequency_ms: { default: 15 },
           print_step: { default: 1 },
           print_strategy: "fast",
         },
@@ -164,13 +202,14 @@ export class FeishuStreamingSession {
       };
     }
 
-    const createRes = await fetch("https://open.feishu.cn/open-apis/cardkit/v1/cards", {
+    const createRes = await undiciFetch("https://open.feishu.cn/open-apis/cardkit/v1/cards", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ type: "card_json", data: JSON.stringify(cardJson) }),
+      dispatcher: feishuHttpAgent,
     });
 
     if (!createRes.ok) {
@@ -227,6 +266,7 @@ export class FeishuStreamingSession {
     this.log?.(`Started streaming: cardId=${cardId}, messageId=${sendRes.data.message_id}`);
   }
 
+  /** Sync state mutation + pre-allocated sequence → fire-and-forget fetch. Handler.ts does NOT await, so API latency never blocks SSE consumption. */
   async update(text: string): Promise<void> {
     if (!this.state || this.closed) return;
 
@@ -238,45 +278,120 @@ export class FeishuStreamingSession {
 
     const shouldForceUpdate = shouldPushStreamingUpdate(this.state.currentText, mergedInput);
     const now = Date.now();
-    if (!shouldForceUpdate && now - this.lastUpdateTime < this.updateThrottleMs) {
+    const throttleAge = now - this.lastUpdateTime;
+    if (!shouldForceUpdate && throttleAge < this.updateThrottleMs) {
+      this.log?.(`update throttled: +${mergedInput.length - this.state.currentText.length}chars delta, throttleAge=${throttleAge}ms, pending flush in ${Math.max(0, this.updateThrottleMs - throttleAge)}ms`);
       this.schedulePendingFlush();
       return;
     }
     this.lastUpdateTime = now;
 
-    this.queue = this.queue.then(async () => {
-      if (!this.state || this.closed) return;
-      const nextText = this.pendingText ?? mergedInput;
-      const mergedText = mergeStreamingText(this.state.currentText, nextText);
-      if (!mergedText || mergedText === this.state.currentText) return;
-      this.pendingText = null;
-      this.state.currentText = mergedText;
-      await this.updateCardContent(mergedText);
-    });
-    await this.queue;
+    // Sequence pre-allocation: guarantees monotonic sequence even with concurrent in-flight fetches
+    const mergedText = mergeStreamingText(this.state.currentText, this.pendingText ?? mergedInput);
+    if (!mergedText || mergedText === this.state.currentText) return;
+    const prevLen = this.state.currentText.length;
+    this.pendingText = null;
+    this.state.currentText = mergedText;
+    this.state.sequence += 1;
+
+    const seq = this.state.sequence;
+    const cardId = this.state.cardId;
+
+    this.log?.(`update force-push: seq=${seq}, +${mergedText.length - prevLen}chars, total=${mergedText.length}chars, inFlight=${this.inFlight.size}`);
+
+    const p = this.fetchContentUpdate(mergedText, cardId, seq);
+    this.trackInFlight(p);
+  }
+
+  /** Replace card content entirely — used when transitioning from thinking phase to streaming text. */
+  async replaceContent(text: string): Promise<void> {
+    if (!this.state || this.closed) return;
+    if (!text) return;
+
+    this.clearFlushTimer();
+    this.lastUpdateTime = Date.now();
+    this.pendingText = null;
+    this.state.currentText = text;
+    this.state.sequence += 1;
+
+    const seq = this.state.sequence;
+    const cardId = this.state.cardId;
+    this.log?.(`replaceContent: seq=${seq}, total=${text.length}chars, inFlight=${this.inFlight.size}`);
+
+    const p = this.fetchContentUpdate(text, cardId, seq);
+    this.trackInFlight(p);
   }
 
   async close(finalText?: string, options?: { note?: string }): Promise<void> {
     if (!this.state || this.closed) return;
     this.closed = true;
     this.clearFlushTimer();
-    await this.queue;
+
+    const closeStart = Date.now();
+    const inFlightCount = this.inFlight.size;
+
+    // Drain in-flight: ensures streaming updates reach Feishu before freezing the card
+    await Promise.all([...this.inFlight]);
+    const drainMs = Date.now() - closeStart;
+    this.log?.(`close drain: ${inFlightCount} in-flight, ${drainMs}ms`);
 
     const pendingMerged = mergeStreamingText(this.state.currentText, this.pendingText ?? undefined);
     const text = finalText ? mergeStreamingText(pendingMerged, finalText) : pendingMerged;
 
+    // Final content update — sequential, awaited for reliability.
     if (text && text !== this.state.currentText) {
-      await this.updateCardContent(text);
+      this.state.sequence += 1;
+      await this.fetchContentUpdate(text, this.state.cardId, this.state.sequence);
       this.state.currentText = text;
     }
 
+    // Final note update — sequential, awaited for reliability.
     if (options?.note) {
-      await this.updateNoteContent(options.note);
+      this.state.sequence += 1;
+      const noteSeq = this.state.sequence;
+      const noteToken = await getTenantToken(this.creds);
+      await undiciFetch(
+        `https://open.feishu.cn/open-apis/cardkit/v1/cards/${this.state.cardId}/elements/note/content`,
+        {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${noteToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            content: `<font color='grey'>${options.note}</font>`,
+            sequence: noteSeq,
+            uuid: `n_${this.state.cardId}_${noteSeq}`,
+          }),
+          dispatcher: feishuHttpAgent,
+        },
+      ).catch((e: unknown) => this.log?.(`Final note update failed: ${String(e)}`));
     }
 
     this.state.sequence += 1;
+    const loadSeq = this.state.sequence;
+    const loadToken = await getTenantToken(this.creds);
+    await undiciFetch(
+      `https://open.feishu.cn/open-apis/cardkit/v1/cards/${this.state.cardId}/elements/loading/content`,
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${loadToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          content: "",
+          sequence: loadSeq,
+          uuid: `l_${this.state.cardId}_${loadSeq}`,
+        }),
+        dispatcher: feishuHttpAgent,
+      },
+    ).catch((e: unknown) => this.log?.(`Final loading clear failed: ${String(e)}`));
+
+    // Disable streaming_mode — the card is now frozen.
+    this.state.sequence += 1;
     const token = await getTenantToken(this.creds);
-    await fetch(`https://open.feishu.cn/open-apis/cardkit/v1/cards/${this.state.cardId}/settings`, {
+    await undiciFetch(`https://open.feishu.cn/open-apis/cardkit/v1/cards/${this.state.cardId}/settings`, {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -292,27 +407,128 @@ export class FeishuStreamingSession {
         sequence: this.state.sequence,
         uuid: `c_${this.state.cardId}_${this.state.sequence}`,
       }),
+      dispatcher: feishuHttpAgent,
     }).catch((e: unknown) => this.log?.(`Close failed: ${String(e)}`));
 
+    const totalCloseMs = Date.now() - closeStart;
     const finalState = this.state;
     this.state = null;
     this.pendingText = null;
 
-    this.log?.(`Closed streaming: cardId=${finalState.cardId}`);
+    this.log?.(`close total: ${totalCloseMs}ms, cardId=${finalState.cardId}`);
   }
 
   isActive(): boolean {
     return this.state !== null && !this.closed;
   }
 
-  private async updateCardContent(text: string): Promise<void> {
-    if (!this.state) return;
+  /**
+   * Fire-and-forget note content update during streaming.
+   * Pre-allocates sequence synchronously, then fires fetch concurrently.
+   */
+  public async updateNoteContent(note: string): Promise<void> {
+    if (!this.state || this.closed) return;
+
+    // Pre-allocate sequence synchronously
+    this.state.sequence += 1;
+    const seq = this.state.sequence;
+    const cardId = this.state.cardId;
+
+    const p = getTenantToken(this.creds).then(async (token) => {
+      await undiciFetch(
+        `https://open.feishu.cn/open-apis/cardkit/v1/cards/${cardId}/elements/note/content`,
+        {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            content: `<font color='grey'>${note}</font>`,
+            sequence: seq,
+            uuid: `n_${cardId}_${seq}`,
+          }),
+          dispatcher: feishuHttpAgent,
+        },
+      ).catch((e: unknown) => this.log?.(`Note update failed: ${String(e)}`));
+    });
+    this.trackInFlight(p);
+  }
+
+  public async updateLoadingContent(content: string): Promise<void> {
+    if (!this.state || this.closed) return;
 
     this.state.sequence += 1;
-    const token = await getTenantToken(this.creds);
+    const seq = this.state.sequence;
+    const cardId = this.state.cardId;
 
-    const response = await fetch(
-      `https://open.feishu.cn/open-apis/cardkit/v1/cards/${this.state.cardId}/elements/content/content`,
+    const p = getTenantToken(this.creds).then(async (token) => {
+      await undiciFetch(
+        `https://open.feishu.cn/open-apis/cardkit/v1/cards/${cardId}/elements/loading/content`,
+        {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            content,
+            sequence: seq,
+            uuid: `l_${cardId}_${seq}`,
+          }),
+          dispatcher: feishuHttpAgent,
+        },
+      ).catch((e: unknown) => this.log?.(`Loading update failed: ${String(e)}`));
+    });
+    this.trackInFlight(p);
+  }
+
+  /**
+   * Fire-and-forget header update during streaming.
+   * Pre-allocates sequence synchronously, then fires fetch concurrently.
+   */
+  public async updateHeader(title: string, template: string = "blue"): Promise<void> {
+    if (!this.state || this.closed) return;
+
+    // Pre-allocate sequence synchronously
+    this.state.sequence += 1;
+    const seq = this.state.sequence;
+    const cardId = this.state.cardId;
+
+    const p = getTenantToken(this.creds).then(async (token) => {
+      await undiciFetch(
+        `https://open.feishu.cn/open-apis/cardkit/v1/cards/${cardId}/settings`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json; charset=utf-8",
+          },
+          body: JSON.stringify({
+            settings: JSON.stringify({
+              header: {
+                title: { tag: "plain_text", content: title },
+                template,
+              },
+            }),
+            sequence: seq,
+            uuid: `h_${cardId}_${seq}`,
+          }),
+          dispatcher: feishuHttpAgent,
+        },
+      ).catch((e: unknown) => this.log?.(`Header update failed: ${String(e)}`));
+    });
+    this.trackInFlight(p);
+  }
+
+  // ── Private helpers ──────────────────────────────────────────────
+
+  /** Fire-and-forget card content update with a pre-allocated sequence number. */
+  private async fetchContentUpdate(text: string, cardId: string, sequence: number): Promise<void> {
+    const fetchStart = Date.now();
+    const token = await getTenantToken(this.creds);
+    const response = await undiciFetch(
+      `https://open.feishu.cn/open-apis/cardkit/v1/cards/${cardId}/elements/content/content`,
       {
         method: "PUT",
         headers: {
@@ -321,66 +537,27 @@ export class FeishuStreamingSession {
         },
         body: JSON.stringify({
           content: text,
-          sequence: this.state.sequence,
-          uuid: `s_${this.state.cardId}_${this.state.sequence}`,
+          sequence,
+          uuid: `s_${cardId}_${sequence}`,
         }),
+        dispatcher: feishuHttpAgent,
       },
     );
 
+    const elapsed = Date.now() - fetchStart;
+    this.log?.(`fetchContentUpdate seq=${sequence} done: ${elapsed}ms, status=${response.status}, textLen=${text.length}`);
+
     if (!response.ok) {
-      this.log?.(`Update content failed with HTTP ${response.status}`);
+      this.log?.(`Update content failed with HTTP ${response.status} (seq ${sequence})`);
     }
   }
 
-  public async updateNoteContent(note: string): Promise<void> {
-    if (!this.state) return;
-
-    this.state.sequence += 1;
-    const token = await getTenantToken(this.creds);
-
-    await fetch(
-      `https://open.feishu.cn/open-apis/cardkit/v1/cards/${this.state.cardId}/elements/note/content`,
-      {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          content: `<font color='grey'>${note}</font>`,
-          sequence: this.state.sequence,
-          uuid: `n_${this.state.cardId}_${this.state.sequence}`,
-        }),
-      },
-    ).catch((e: unknown) => this.log?.(`Note update failed: ${String(e)}`));
-  }
-
-  public async updateHeader(title: string, template: string = "blue"): Promise<void> {
-    if (!this.state) return;
-
-    this.state.sequence += 1;
-    const token = await getTenantToken(this.creds);
-
-    await fetch(
-      `https://open.feishu.cn/open-apis/cardkit/v1/cards/${this.state.cardId}/settings`,
-      {
-        method: "PATCH",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json; charset=utf-8",
-        },
-        body: JSON.stringify({
-          settings: JSON.stringify({
-            header: {
-              title: { tag: "plain_text", content: title },
-              template,
-            },
-          }),
-          sequence: this.state.sequence,
-          uuid: `h_${this.state.cardId}_${this.state.sequence}`,
-        }),
-      },
-    ).catch((e: unknown) => this.log?.(`Header update failed: ${String(e)}`));
+  /** Track a fire-and-forget request so close() can drain it before finalising. */
+  private trackInFlight(promise: Promise<void>): void {
+    this.inFlight.add(promise);
+    promise
+      .then(() => this.inFlight.delete(promise))
+      .catch(() => this.inFlight.delete(promise));
   }
 
   private clearFlushTimer(): void {

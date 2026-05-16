@@ -310,6 +310,98 @@ class PhaseTracker {
   }
 }
 
+// ─── Thinking Tracker ──────────────────────────────────────────────────
+
+const THINKING_TOOL_EMOJI: Record<string, string> = {
+  read: "📖", grep: "🔍", bash: "⚡", edit: "✏️", write: "📝",
+  glob: "📂", ast_grep_search: "🔍", ast_grep_replace: "✏️",
+  lsp_diagnostics: "🔍", lsp_goto_definition: "🔍", lsp_find_references: "🔍",
+};
+
+class ThinkingTracker {
+  private active: Array<{ tool: string; label: string; id: number }> = [];
+  private counts = new Map<string, number>();
+  private nextId = 0;
+
+  start(tool: string, label?: string): number {
+    const id = this.nextId++;
+    this.active.push({ tool, label: label ?? this.fallbackLabel(tool), id });
+    return id;
+  }
+
+  completeById(id: number): void {
+    const entry = this.active.find((a) => a.id === id);
+    if (entry) {
+      this.active = this.active.filter((a) => a.id !== id);
+      this.counts.set(entry.tool, (this.counts.get(entry.tool) ?? 0) + 1);
+    }
+  }
+
+  completeAllByName(tool: string): void {
+    const entries = this.active.filter((a) => a.tool === tool);
+    for (const entry of entries) {
+      this.counts.set(entry.tool, (this.counts.get(entry.tool) ?? 0) + 1);
+    }
+    this.active = this.active.filter((a) => a.tool !== tool);
+  }
+
+  failById(id: number): void {
+    this.active = this.active.filter((a) => a.id !== id);
+  }
+
+  buildDisplay(): string {
+    if (this.active.length === 0 && this.counts.size === 0) return "";
+
+    const lines: string[] = [];
+
+    const recent = this.active.slice(-2);
+    for (const entry of recent) {
+      const emoji = THINKING_TOOL_EMOJI[entry.tool.toLowerCase()] ?? THINKING_TOOL_EMOJI[entry.tool] ?? "🔧";
+      lines.push(`${emoji} ${entry.label}`);
+    }
+
+    const summary = this.buildSummary();
+    if (summary) lines.push(summary);
+
+    return lines.join("\n");
+  }
+
+  private buildSummary(): string {
+    const items: string[] = [];
+    let reads = 0, searches = 0, commands = 0, edits = 0, writes = 0, others = 0;
+    for (const [tool, count] of this.counts) {
+      const lower = tool.toLowerCase();
+      if (lower === "read") reads += count;
+      else if (lower.includes("grep") || lower.includes("search") || lower === "glob" || lower === "lsp_diagnostics" || lower === "lsp_goto_definition" || lower === "lsp_find_references") searches += count;
+      else if (lower === "bash") commands += count;
+      else if (lower === "edit" || lower === "ast_grep_replace") edits += count;
+      else if (lower === "write") writes += count;
+      else if (lower !== "task" && lower !== "route_to_bot" && lower !== "call_omo_agent") others += count;
+    }
+    if (reads > 0) items.push(`📖${reads}文件`);
+    if (searches > 0) items.push(`🔍${searches}搜索`);
+    if (commands > 0) items.push(`⚡${commands}命令`);
+    if (edits > 0) items.push(`✏️${edits}编辑`);
+    if (writes > 0) items.push(`📝${writes}写入`);
+    if (others > 0) items.push(`🔧${others}操作`);
+    return items.length > 0 ? `已探索: ${items.join(" · ")}` : "";
+  }
+
+  private fallbackLabel(tool: string): string {
+    const lower = tool.toLowerCase();
+    if (lower === "read") return "正在阅读文件";
+    if (lower.includes("grep") || lower.includes("search")) return "正在搜索";
+    if (lower === "bash") return "正在执行命令";
+    if (lower === "edit" || lower === "ast_grep_replace") return "正在编辑文件";
+    if (lower === "write") return "正在写入文件";
+    if (lower === "glob") return "正在查找文件";
+    if (lower === "lsp_diagnostics") return "正在检查错误";
+    if (lower === "lsp_goto_definition") return "正在追踪定义";
+    if (lower === "lsp_find_references") return "正在查找引用";
+    return `正在使用 ${tool}`;
+  }
+}
+
 // ─── Content Display Strategy ────────────────────────────────────────
 
 type DisplayStrategy =
@@ -446,7 +538,14 @@ function handleToolPartUpdate(part: { tool?: string; state?: { status?: string; 
 }
 
 function extractLastAssistantText(messages: any[]): string {  const assistantMsgs = messages.filter(
-    (msg: any) => msg.info?.role === "assistant",
+    (msg: any) => {
+      if (msg.info?.role !== "assistant") return false;
+      const agent = (msg.info?.agent ?? msg.agent ?? "") as string;
+      if (agent.trim().toLowerCase() === "compaction") return false;
+      const parts = (msg.parts ?? []) as Array<Record<string, unknown>>;
+      if (parts.some((p) => p.type === "compaction")) return false;
+      return true;
+    },
   );
   const lastMsg = assistantMsgs.at(-1);
   if (!lastMsg) return "";
@@ -517,17 +616,23 @@ async function streamAgentReply(
   await closeActiveStreamingSession(chatId);
 
   const phase = new PhaseTracker();
+  const thinking = new ThinkingTracker();
   const startTime = Date.now();
 
   try {
+    await streaming.warmTokenCache();
+
+    logger.info(`[feishu-streaming] Calling streaming.start for chatId=${chatId}`);
     await streaming.start(chatId, "chat_id", {
       replyToMessageId: messageId,
     });
+    logger.info(`[feishu-streaming] streaming.start succeeded for chatId=${chatId}`);
 
     activeStreamingSessions.set(chatId, streaming);
 
     let accumulatedText = "";
     let lastNote = "";
+    let lastThinkingDisplay = "";
     let sessionIdle = false;
 
     let sseProducedText = false;
@@ -546,9 +651,66 @@ async function streamAgentReply(
     let receivedTextDelta = false;
     let sessionDone = false;
     let lastError: string | null = null;
+    let isCompacting = false;
+    let compactReason: "auto" | "manual" = "auto";
+
+    const SSE_INITIAL_TIMEOUT_MS = 8_000;
+    let sseFirstEventReceived = false;
+
+const LOADING_DOTS = ["", ".", "..", "..."];
+    let loadingDotsIndex = 0;
+    let lastLoadingContent = "";
+    let lastNoteContent = "";
+
+const thinkingHeartbeat = setInterval(() => {
+      if (!streaming.isActive()) return;
+      loadingDotsIndex = (loadingDotsIndex + 1) % LOADING_DOTS.length;
+      const dots = LOADING_DOTS[loadingDotsIndex];
+
+      if (!receivedTextDelta) {
+        if (isCompacting) {
+          const compactLabel = compactReason === "auto" ? "自动压缩上下文" : "压缩上下文";
+          const cardContent = `🔄 ${compactLabel}${dots}\n请稍候，压缩完成后继续回复...`;
+          if (cardContent !== lastThinkingDisplay) {
+            lastThinkingDisplay = cardContent;
+            streaming.replaceContent(cardContent);
+          }
+        } else {
+          const thinkingDisplay = thinking.buildDisplay();
+          const phaseNote = phase.buildNote();
+          const cardContent = thinkingDisplay
+            ? `⏳ 正在思考${dots}\n${thinkingDisplay}`
+            : (phaseNote ? `⏳ AI正在处理${dots}\n${phaseNote}` : `⏳ 正在思考${dots}`);
+
+          if (cardContent !== lastThinkingDisplay) {
+            lastThinkingDisplay = cardContent;
+            streaming.replaceContent(cardContent);
+          }
+        }
+      } else {
+        const thinkingDisplay = thinking.buildDisplay();
+        const phaseNote = phase.buildNote();
+        let loadingContent = "";
+        if (isCompacting) {
+          loadingContent = `🔄 压缩中${dots}`;
+        } else if (thinkingDisplay) {
+          loadingContent = `${thinkingDisplay}\n⏳ 思考${dots}`;
+        } else if (phaseNote) {
+          loadingContent = `${phaseNote}\n⏳ 处理中${dots}`;
+        } else {
+          loadingContent = `⏳${dots}`;
+        }
+        if (loadingContent !== lastLoadingContent) {
+          lastLoadingContent = loadingContent;
+          streaming.updateLoadingContent(loadingContent);
+        }
+      }
+    }, 500);
 
     try {
-      for await (const globalEvent of eventResult.stream) {
+      const sseIterator = eventResult.stream[Symbol.asyncIterator]();
+
+      for (;;) {
         if (Date.now() - sseStart > REPLY_TIMEOUT_MS) {
           logger.warn(`[feishu-streaming] Session deadline exceeded (${REPLY_TIMEOUT_MS}ms), closing SSE`);
           sessionDone = true;
@@ -556,16 +718,45 @@ async function streamAgentReply(
         }
         if (sessionDone) break;
 
+        const nextEventPromise = sseIterator.next();
+
+        let iteratorResult: IteratorResult<unknown>;
+        if (!sseFirstEventReceived) {
+          // Race first event against initial timeout — prevents infinite wait when SSE stream is empty
+          let timeoutId: ReturnType<typeof setTimeout> | undefined;
+          const timeoutPromise = new Promise<IteratorResult<never>>((resolve) => {
+            timeoutId = setTimeout(() => {
+              logger.warn(`[feishu-streaming] No SSE events within ${SSE_INITIAL_TIMEOUT_MS}ms, falling back to polling`);
+              resolve({ done: true, value: undefined as never });
+            }, SSE_INITIAL_TIMEOUT_MS);
+          });
+          iteratorResult = await Promise.race([nextEventPromise, timeoutPromise]);
+          if (timeoutId) clearTimeout(timeoutId);
+        } else {
+          iteratorResult = await nextEventPromise;
+        }
+
+        if (iteratorResult.done) {
+          if (!sseFirstEventReceived) {
+            logger.warn(`[feishu-streaming] SSE stream ended or timed out with no events, falling back to polling`);
+          }
+          break;
+        }
+
+        sseFirstEventReceived = true;
+        const globalEvent = iteratorResult.value;
+
         const event = globalEvent as { directory?: string; payload: Record<string, unknown> };
         const payload = event.payload;
-        // SDK v2 events have nested structure: { id, type, properties: { sessionID, delta, ... } }
-        // but older/opencode-server events may use flat structure: { type, sessionID, delta, ... }
-        // Support both by extracting from properties first, then fallback to flat level
         const props = (payload.properties as Record<string, unknown> | undefined) ?? {};
         const payloadType = (payload.type as string) ?? (props.type as string);
         const payloadSessionId = (props.sessionID as string | undefined) ?? (payload.sessionID as string | undefined);
         logger.debug(`[feishu-streaming] SSE raw event: type=${payloadType ?? 'unknown'}, sessionID=${payloadSessionId ?? 'none'}, keys=${Object.keys(payload).join(',')}, elapsed=${Date.now() - sseStart}ms`);
-        if (directory && event.directory !== directory) continue;
+
+        if (directory && event.directory !== directory) {
+          logger.debug(`[feishu-streaming] SSE event filtered by directory: eventDir=${event.directory ?? 'none'}, expectedDir=${directory}`);
+          continue;
+        }
 
         switch (payloadType) {
           case "server.connected": {
@@ -578,13 +769,49 @@ async function streamAgentReply(
             break;
           }
 
+          case "session.next.compaction.started": {
+            if (payloadSessionId === sessionId) {
+              isCompacting = true;
+              compactReason = ((props.reason as string) ?? (payload.reason as string)) === "manual" ? "manual" : "auto";
+              receivedTextDelta = false;
+              logger.info(`[feishu-streaming] SSE compaction started: reason=${compactReason}`);
+            }
+            break;
+          }
+
+          case "session.next.compaction.delta": {
+            if (payloadSessionId === sessionId) {
+              const delta = (props.text as string) ?? (payload.text as string) ?? "";
+              logger.debug(`[feishu-streaming] SSE compaction delta: +${delta.length} chars (suppressed from card)`);
+            }
+            break;
+          }
+
+          case "session.next.compaction.ended": {
+            if (payloadSessionId === sessionId) {
+              isCompacting = false;
+              lastThinkingDisplay = "";
+              logger.info(`[feishu-streaming] SSE compaction ended, resuming normal display`);
+            }
+            break;
+          }
+
           case "session.next.text.delta": {
             if (payloadSessionId === sessionId) {
+              if (isCompacting) {
+                logger.debug(`[feishu-streaming] SSE text delta suppressed during compaction`);
+                break;
+              }
               const delta = (props.delta as string) ?? (payload.delta as string) ?? "";
               accumulatedText += delta;
-              receivedTextDelta = true;
+              if (!receivedTextDelta) {
+                receivedTextDelta = true;
+                streaming.replaceContent(accumulatedText);
+                logger.info(`[feishu-streaming] SSE first text delta: +${delta.length} chars (total: ${accumulatedText.length}), replaced thinking`);
+              } else {
+                streaming.update(accumulatedText);
+              }
               sseProducedText = true;
-              await streaming.update(accumulatedText);
               logger.info(`[feishu-streaming] SSE text delta: +${delta.length} chars (total: ${accumulatedText.length})`);
             }
             break;
@@ -592,12 +819,20 @@ async function streamAgentReply(
 
           case "message.part.delta": {
             if (payloadSessionId === sessionId) {
+              if (isCompacting) {
+                logger.debug(`[feishu-streaming] SSE message.part.delta suppressed during compaction`);
+                break;
+              }
               const delta = (props.delta as string) ?? (payload.delta as string) ?? "";
               if (delta) {
                 accumulatedText += delta;
-                receivedTextDelta = true;
+                if (!receivedTextDelta) {
+                  receivedTextDelta = true;
+                  streaming.replaceContent(accumulatedText);
+                } else {
+                  streaming.update(accumulatedText);
+                }
                 sseProducedText = true;
-                await streaming.update(accumulatedText);
                 logger.info(`[feishu-streaming] SSE message.part.delta: +${delta.length} chars (total: ${accumulatedText.length})`);
               }
             }
@@ -609,23 +844,79 @@ async function streamAgentReply(
 
             const part = (props.part as Record<string, unknown>) ?? (payload.part as Record<string, unknown>);
 
+            if (part.type === "compaction") {
+              isCompacting = true;
+              compactReason = part.auto === false ? "manual" : "auto";
+              logger.info(`[feishu-streaming] SSE compaction part detected (auto=${compactReason})`);
+              break;
+            }
+
+            if (isCompacting && part.type === "text") {
+              logger.debug(`[feishu-streaming] SSE text part suppressed during compaction`);
+              break;
+            }
+
             if (part.type === "text" && !receivedTextDelta) {
               const newText = part.text as string;
               if (newText && newText !== accumulatedText) {
                 accumulatedText = newText;
                 sseProducedText = true;
-                await streaming.update(accumulatedText);
+                streaming.replaceContent(accumulatedText);
               }
             }
 
-            if (part.type === "tool") {
+if (part.type === "tool") {
               handleToolPartUpdate(part as { tool?: string; state?: { status?: string; metadata?: Record<string, unknown>; input?: Record<string, unknown>; error?: string; title?: string } }, phase);
+
+              const toolState = (part.state as { status?: string; title?: string }) ?? {};
+              const toolName = (part.tool as string) ?? "";
+              const isDelegationTool = toolName === "route_to_bot" || toolName === "call_omo_agent" || toolName === "task";
+              if (!isDelegationTool) {
+                const status = toolState.status;
+                if (status === "running" || status === "pending") {
+                  thinking.start(toolName, status === "pending" ? (toolState.title ?? "等待执行") : toolState.title);
+                }
+                if (status === "completed") thinking.completeAllByName(toolName);
+                if (status === "error") thinking.completeAllByName(toolName);
+              }
+
               const newNote = phase.buildNote();
               if (newNote !== lastNote) {
                 lastNote = newNote;
-                if (newNote) await streaming.updateNoteContent(newNote);
-                logger.info(`[feishu-streaming] SSE note updated: ${newNote}`);
+                if (newNote) streaming.updateNoteContent(newNote);
               }
+
+              if (!receivedTextDelta) {
+                loadingDotsIndex = (loadingDotsIndex + 1) % LOADING_DOTS.length;
+                const dots = LOADING_DOTS[loadingDotsIndex];
+                const thinkingDisplay = thinking.buildDisplay();
+                const cardContent = thinkingDisplay
+                  ? `⏳ 正在思考${dots}\n${thinkingDisplay}`
+                  : (newNote ? `⏳ AI正在处理${dots}\n${newNote}` : `⏳ 正在思考${dots}`);
+
+                if (cardContent !== lastThinkingDisplay) {
+                  lastThinkingDisplay = cardContent;
+                  streaming.replaceContent(cardContent);
+                }
+              } else {
+                loadingDotsIndex = (loadingDotsIndex + 1) % LOADING_DOTS.length;
+                const dots = LOADING_DOTS[loadingDotsIndex];
+                const thinkingDisplay = thinking.buildDisplay();
+                let loadingContent = "";
+                if (thinkingDisplay) {
+                  loadingContent = `${thinkingDisplay}\n⏳ 思考${dots}`;
+                } else if (newNote) {
+                  loadingContent = `${newNote}\n⏳ 处理中${dots}`;
+                } else {
+                  loadingContent = `⏳${dots}`;
+                }
+                if (loadingContent !== lastLoadingContent) {
+                  lastLoadingContent = loadingContent;
+                  streaming.updateLoadingContent(loadingContent);
+                }
+              }
+
+              logger.info(`[feishu-streaming] SSE tool update: ${toolName} status=${toolState.status ?? "?"}`);
             }
 
             if (part.type === "subtask" && part.agent) {
@@ -636,11 +927,19 @@ async function streamAgentReply(
 
           case "session.next.text.ended": {
             if (payloadSessionId === sessionId) {
+              if (isCompacting) {
+                logger.debug(`[feishu-streaming] SSE text ended suppressed during compaction`);
+                break;
+              }
               const text = (props.text as string) ?? (payload.text as string) ?? "";
               accumulatedText = text;
-              receivedTextDelta = true;
+              if (!receivedTextDelta) {
+                receivedTextDelta = true;
+                streaming.replaceContent(accumulatedText);
+              } else {
+                streaming.update(accumulatedText);
+              }
               sseProducedText = true;
-              await streaming.update(accumulatedText);
               logger.info(`[feishu-streaming] SSE text generation ended: ${accumulatedText.length} chars`);
             }
             break;
@@ -649,15 +948,31 @@ async function streamAgentReply(
           case "message.updated": {
             if (payloadSessionId === sessionId) {
               const info = (props.info as Record<string, unknown>) ?? (payload.info as Record<string, unknown>);
+              const agent = (info?.agent as string) ?? (props.agent as string) ?? (payload.agent as string) ?? "";
+              if (agent.trim().toLowerCase() === "compaction") {
+                isCompacting = true;
+                logger.info(`[feishu-streaming] SSE compaction message detected (agent=compaction)`);
+                break;
+              }
+              if (isCompacting) {
+                logger.debug(`[feishu-streaming] SSE message.updated suppressed during compaction`);
+                break;
+              }
               if (info?.role === "assistant" && !receivedTextDelta) {
                 const parts = (info.parts as Array<Record<string, unknown>>) ?? [];
+                const hasCompactionPart = parts.some((p) => p.type === "compaction");
+                if (hasCompactionPart) {
+                  isCompacting = true;
+                  logger.info(`[feishu-streaming] SSE compaction part found in message.updated`);
+                  break;
+                }
                 for (const p of parts) {
                   if (p.type === "text" && p.text) {
                     const newText = p.text as string;
                     if (newText && newText !== accumulatedText) {
                       accumulatedText = newText;
                       sseProducedText = true;
-                      await streaming.update(accumulatedText);
+                      streaming.replaceContent(accumulatedText);
                       logger.info(`[feishu-streaming] SSE message.updated text: ${accumulatedText.length} chars`);
                     }
                     break;
@@ -684,9 +999,13 @@ async function streamAgentReply(
                 lastError = status.message ?? lastError;
                 const actionInfo = status.action;
                 const userMsg = classifyErrorForUser("", lastError ?? "unknown");
-                await streaming.update(`${userMsg}\n\n🔄 自动重试中 (attempt ${status.attempt ?? "?"})`);
+                if (!receivedTextDelta) {
+                  streaming.replaceContent(`${userMsg}\n\n🔄 自动重试中 (attempt ${status.attempt ?? "?"})`);
+                } else {
+                  streaming.update(`${userMsg}\n\n🔄 自动重试中 (attempt ${status.attempt ?? "?"})`);
+                }
                 if (actionInfo?.link) {
-                  await streaming.updateNoteContent(`[${actionInfo.label ?? "查看详情"}](${actionInfo.link})`);
+                  streaming.updateNoteContent(`[${actionInfo.label ?? "查看详情"}](${actionInfo.link})`);
                 }
                 logger.info(`[feishu-streaming] SSE session retry: attempt=${status.attempt ?? "?"}, message=${lastError ?? "unknown"}, action=${actionInfo ? JSON.stringify(actionInfo) : "none"}`);
               }
@@ -704,7 +1023,11 @@ async function streamAgentReply(
                 const statusCode = (errorData.statusCode as number) ?? (errorData.status as number);
                 lastError = errorMsg;
                 const userMsg = classifyErrorForUser(errorName, errorMsg, statusCode);
-                await streaming.update(userMsg);
+                if (!receivedTextDelta) {
+                  streaming.replaceContent(userMsg);
+                } else {
+                  streaming.update(userMsg);
+                }
                 logger.warn(`[feishu-streaming] SSE session error: ${errorName} - ${errorMsg}`);
               }
             }
@@ -718,11 +1041,13 @@ async function streamAgentReply(
       if (isConnectionError) {
         logger.warn(`[feishu-streaming] SSE connection exhausted (SDK retries failed): ${errMsg}, falling back to polling`);
         if (!sseProducedText) {
-          await streaming.update(`🌐 SSE连接中断，正在切换到轮询模式获取结果...\n\n${errMsg}`);
+          streaming.replaceContent(`🌐 SSE连接中断，正在切换到轮询模式获取结果...\n\n${errMsg}`);
         }
       } else {
         logger.warn(`[feishu-streaming] SSE stream error: ${errMsg}, falling back to polling`);
       }
+    } finally {
+      clearInterval(thinkingHeartbeat);
     }
 
     if (!sseProducedText && !sessionIdle) {
@@ -756,10 +1081,10 @@ async function streamAgentReply(
               isRetry = true;
               lastError = sessionStatus.message ?? lastError;
               const userMsg = classifyErrorForUser("", lastError ?? "unknown");
-              await streaming.update(`${userMsg}\n\n🔄 自动重试中 (attempt ${sessionStatus.attempt ?? "?"})`);
+              streaming.update(`${userMsg}\n\n🔄 自动重试中 (attempt ${sessionStatus.attempt ?? "?"})`);
               const actionInfo = sessionStatus.action;
               if (actionInfo?.link) {
-                await streaming.updateNoteContent(`[${actionInfo.label ?? "查看详情"}](${actionInfo.link})`);
+                streaming.updateNoteContent(`[${actionInfo.label ?? "查看详情"}](${actionInfo.link})`);
               }
             }
           }
@@ -781,12 +1106,16 @@ async function streamAgentReply(
 
         for (const msg of currentMessages) {
           if (msg.info?.role !== "assistant") continue;
-          for (const part of msg.parts ?? []) {
+          const agent = (msg.info?.agent ?? msg.agent ?? "") as string;
+          if (agent.trim().toLowerCase() === "compaction") continue;
+          const parts = (msg.parts ?? []) as Array<{ type: string; agent?: string; tool?: string; state?: Record<string, unknown>; text?: string }>;
+          if (parts.some((p) => p.type === "compaction")) continue;
+          for (const part of parts) {
             if (part.type === "subtask") {
               phase.addPending(part.agent ?? "unknown");
             }
             if (part.type === "tool") {
-              handleToolPartUpdate(part, phase);
+              handleToolPartUpdate(part as { tool?: string; state?: { status?: string; metadata?: Record<string, unknown>; input?: Record<string, unknown>; error?: string; title?: string } }, phase);
             }
           }
         }
@@ -794,14 +1123,18 @@ async function streamAgentReply(
         const newNote = phase.buildNote();
         if (newNote !== lastNote) {
           lastNote = newNote;
-          if (newNote) await streaming.updateNoteContent(newNote);
+          if (newNote) streaming.updateNoteContent(newNote);
         }
 
         const currentText = extractLastAssistantText(currentMessages);
         if (currentText && currentText !== lastText) {
           lastText = currentText;
           accumulatedText = currentText;
-          await streaming.update(currentText);
+          if (!sseProducedText) {
+            streaming.replaceContent(currentText);
+          } else {
+            streaming.update(currentText);
+          }
           logger.info(`[feishu-streaming] Polling updated card (${currentText.length} chars)`);
         }
 
@@ -844,7 +1177,21 @@ async function streamAgentReply(
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    logger.error("[feishu-streaming] Error in streaming reply", { error: errMsg, sessionId, chatId });
+    const errCauses: string[] = [];
+    let cause: unknown = err instanceof Error ? err.cause : undefined;
+    while (cause instanceof Error) {
+      errCauses.push(`${cause.message} (${cause.constructor.name})`);
+      cause = cause.cause;
+    }
+    if (cause !== undefined && cause !== null) {
+      errCauses.push(String(cause));
+    }
+    logger.error("[feishu-streaming] Error in streaming reply", {
+      error: errMsg,
+      cause: errCauses.length ? errCauses.join(" → ") : undefined,
+      sessionId,
+      chatId,
+    });
     activeStreamingSessions.delete(chatId);
     try {
       await streaming.close(`❌ Error: ${errMsg}`);
