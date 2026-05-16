@@ -215,128 +215,168 @@ async function closeActiveStreamingSession(chatId: string): Promise<void> {
 type AgentPhase = {
   name: string;
   startTime: number;
+  status: "pending" | "running" | "completed" | "failed";
+  error?: string;
 };
 
 class PhaseTracker {
-  private pendingAgents = new Map<string, AgentPhase>();
-  private completedAgents: string[] = [];
-  private failedAgents = new Map<string, string>();
-  private totalDelegations = 0;
+  private agents = new Map<string, AgentPhase>();
   private nextId = 0;
 
   addPending(agentName: string): string {
     const id = `${agentName}_${this.nextId++}`;
-    this.pendingAgents.set(id, { name: agentName, startTime: Date.now() });
-    this.totalDelegations++;
+    this.agents.set(id, { name: agentName, startTime: Date.now(), status: "running" });
+    return id;
+  }
+
+  addAsQueued(agentName: string): string {
+    const id = `${agentName}_${this.nextId++}`;
+    this.agents.set(id, { name: agentName, startTime: Date.now(), status: "pending" });
     return id;
   }
 
   markCompleted(id: string): void {
-    this.pendingAgents.delete(id);
-    this.completedAgents.push(id);
+    const phase = this.agents.get(id);
+    if (phase) phase.status = "completed";
   }
 
   markCompletedByName(agentName: string): void {
-    for (const [id, phase] of this.pendingAgents) {
-      if (phase.name === agentName) {
-        this.pendingAgents.delete(id);
-        this.completedAgents.push(id);
+    for (const [id, phase] of this.agents) {
+      if (phase.name === agentName && phase.status !== "completed" && phase.status !== "failed") {
+        phase.status = "completed";
         return;
       }
     }
   }
 
   markFailed(id: string, error: string): void {
-    this.pendingAgents.delete(id);
-    this.failedAgents.set(id, error);
+    const phase = this.agents.get(id);
+    if (phase) { phase.status = "failed"; phase.error = error; }
   }
 
   markFailedByName(agentName: string, error: string): void {
-    for (const [id, phase] of this.pendingAgents) {
-      if (phase.name === agentName) {
-        this.pendingAgents.delete(id);
-        this.failedAgents.set(id, error);
+    for (const [id, phase] of this.agents) {
+      if (phase.name === agentName && phase.status !== "completed" && phase.status !== "failed") {
+        phase.status = "failed"; phase.error = error;
+        return;
+      }
+    }
+  }
+
+  markRunningByName(agentName: string): void {
+    for (const [, phase] of this.agents) {
+      if (phase.name === agentName && phase.status === "pending") {
+        phase.status = "running";
         return;
       }
     }
   }
 
   isDelegating(): boolean {
-    return this.pendingAgents.size > 0;
+    for (const [, phase] of this.agents) {
+      if (phase.status === "pending" || phase.status === "running") return true;
+    }
+    return false;
   }
 
   hasPendingWithName(agentName: string): boolean {
-    for (const [, phase] of this.pendingAgents) {
-      if (phase.name === agentName) return true;
+    for (const [, phase] of this.agents) {
+      if (phase.name === agentName && (phase.status === "pending" || phase.status === "running")) return true;
     }
     return false;
   }
 
   allDone(): boolean {
-    return this.pendingAgents.size === 0 && this.totalDelegations > 0;
+    if (this.agents.size === 0) return false;
+    for (const [, phase] of this.agents) {
+      if (phase.status === "pending" || phase.status === "running") return false;
+    }
+    return true;
   }
 
   getTotal(): number {
-    return this.totalDelegations;
+    return this.agents.size;
   }
 
   getCompletedCount(): number {
-    return this.completedAgents.length;
+    let count = 0;
+    for (const [, phase] of this.agents) { if (phase.status === "completed") count++; }
+    return count;
   }
 
   getPendingNames(): string[] {
-    return [...this.pendingAgents.values()].map((a) => a.name);
+    const names: string[] = [];
+    for (const [, phase] of this.agents) {
+      if (phase.status === "pending" || phase.status === "running") names.push(phase.name);
+    }
+    return names;
   }
 
   getElapsedMsForFirstPending(): number {
-    const first = this.pendingAgents.values().next().value;
-    return first ? Date.now() - first.startTime : 0;
+    for (const [, phase] of this.agents) {
+      if (phase.status === "pending" || phase.status === "running") return Date.now() - phase.startTime;
+    }
+    return 0;
   }
 
   buildNote(): string {
-    if (this.totalDelegations === 0) return "";
+    if (this.agents.size === 0) return "";
 
-    const parts: string[] = [];
-    const completedCount = this.completedAgents.length;
-    const total = this.totalDelegations;
-    const pendingCount = this.pendingAgents.size;
+    const queued: string[] = [];
+    const running: string[] = [];
+    const completed: string[] = [];
+    const failed: string[] = [];
 
-    if (pendingCount > 0 || completedCount > 0) {
-      let statusLabel = `🔍 子任务`;
-      if (completedCount > 0 && pendingCount > 0) {
-        statusLabel += `: 已完成${completedCount}个, 执行中${pendingCount}个(共${total}个)`;
-      } else if (completedCount > 0) {
-        statusLabel = `✅ 已完成${completedCount}个子任务(共${total}个)`;
-      } else {
-        statusLabel += `: 执行中${pendingCount}个(共${total}个)`;
+    for (const [, phase] of this.agents) {
+      switch (phase.status) {
+        case "pending": queued.push(phase.name); break;
+        case "running": running.push(phase.name); break;
+        case "completed": completed.push(phase.name); break;
+        case "failed": failed.push(phase.name); break;
       }
-      if (pendingCount > 0) {
-        const elapsed = this.getElapsedMsForFirstPending();
-        if (elapsed > 60_000) {
-          statusLabel += ` (已等${formatElapsed(elapsed)})`;
-        }
-      }
-      parts.push(statusLabel);
     }
 
-    if (this.failedAgents.size > 0) {
-      const failedNames = [...this.failedAgents.keys()];
-      parts.push(`❌ ${failedNames.join(", ")} 失败`);
+    const lines: string[] = ["📋 子任务进展"];
+
+    if (running.length > 0) {
+      lines.push(`🔄 执行中(${running.length}): ${running.join("、")}`);
+    }
+    if (queued.length > 0) {
+      lines.push(`⏳ 待执行(${queued.length}): ${queued.join("、")}`);
+    }
+    if (completed.length > 0) {
+      lines.push(`✅ 已完成(${completed.length}): ${completed.join("、")}`);
+    }
+    if (failed.length > 0) {
+      lines.push(`❌ 失败(${failed.length}): ${failed.join("、")}`);
     }
 
-    return parts.join(" · ");
+    if (this.isDelegating()) {
+      const elapsed = this.getElapsedMsForFirstPending();
+      if (elapsed > 60_000) {
+        lines.push(`⏱ 已等${formatElapsed(elapsed)}`);
+      }
+    }
+
+    return lines.join("\n");
   }
 
   buildFinalNote(): string {
-    if (this.totalDelegations === 0) return "✅ 完成";
-    const total = this.totalDelegations;
-    const completed = this.completedAgents.length;
-    const failed = this.failedAgents.size;
+    if (this.agents.size === 0) return "✅ 完成";
+    const completed = this.getCompletedCount();
+    const failed = this.failedCount();
+    const total = this.agents.size;
 
     if (failed > 0) {
-      return `⚠️ 完成 (${completed}个成功/${total}个子任务, ${failed}个失败)`;
+      return `⚠️ 完成 (${completed}个成功/${total}个, ${failed}个失败)`;
     }
     return `✅ 完成 (${completed}个子任务)`;
+  }
+
+  private failedCount(): number {
+    let count = 0;
+    for (const [, phase] of this.agents) { if (phase.status === "failed") count++; }
+    return count;
   }
 }
 
