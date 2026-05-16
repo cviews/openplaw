@@ -493,10 +493,6 @@ function handleToolPartUpdate(
   const titleMatch = (state.title ?? "").match(/委派\s*(\S+)\s*处理/);
   const agentName = String(target ?? titleMatch?.[1] ?? "unknown");
 
-  // Check background flag from multiple locations:
-  // - part.metadata (ToolPart top-level) — OpenCode puts ctx.metadata() here
-  // - state.metadata (ToolStateCompleted.metadata) — required field for completed state
-  // - state.input — the tool call's original input parameters
   const partMetadata = part.metadata ?? {};
   const stateMetadata = state.metadata ?? {};
   const stateInput = (state.input as Record<string, unknown>) ?? {};
@@ -505,19 +501,20 @@ function handleToolPartUpdate(
 
   if (status === "running") phase.addPending(agentName);
 
-  // Key insight: ALL delegation tools (task, route_to_bot, call_omo_agent) spawn child work
-  // that may continue running AFTER the tool call completes. Even foreground task calls block
-  // the parent turn, but the child agent still produces events. For route_to_bot/call_omo_agent,
-  // there is NO background flag — they're openplaw plugins, not OpenCode built-in — but
-  // wait_for_result=false means async execution similar to background.
-  // Therefore: when ANY delegation tool completes, NEVER mark it completed immediately.
-  // Always keep it as pending until the parent session truly finishes (phase.allDone()).
   if (status === "completed") {
-    if (!phase.hasPendingWithName(agentName)) {
-      phase.addPending(agentName);
-      logger.info(`[feishu-streaming] Delegation tool completed but no pending entry yet, added ${agentName} as pending`);
+    if (isBackground) {
+      // Background task: tool call completed, but child agent still running.
+      // Keep as pending so isDelegating()=true prevents premature close.
+      if (!phase.hasPendingWithName(agentName)) {
+        phase.addPending(agentName);
+      }
+      logger.info(`[feishu-streaming] Background delegation ${toolName} completed, keeping ${agentName} as running (child agent still active)`);
+    } else {
+      // Foreground task or delegation without background flag (route_to_bot, call_omo_agent):
+      // tool call completed means child work is done.
+      phase.markCompletedByName(agentName);
+      logger.info(`[feishu-streaming] Foreground delegation ${toolName} completed, marking ${agentName} as done`);
     }
-    logger.info(`[feishu-streaming] Delegation tool ${toolName} completed (isBackground=${isBackground}), keeping ${agentName} as pending until child results arrive`);
   }
   if (status === "error") phase.markFailedByName(agentName, state.error ?? "unknown error");
 }
@@ -833,6 +830,11 @@ const thinkingHeartbeat = setInterval(() => {
 
         if (iteratorResult.done) {
           logger.info(`[feishu-streaming] SSE stream ended (iteratorResult.done), sessionDone=${sessionDone}, sessionIdle=${sessionIdle}, sseProducedText=${sseProducedText}, phase.isDelegating=${phase.isDelegating()}, phase.total=${phase.getTotal()}, accumulatedText.length=${accumulatedText.length}`);
+          if (phase.isDelegating()) {
+            logger.info(`[feishu-streaming] SSE stream ended while background tasks still running, transitioning to polling for completion`);
+            sessionIdle = true;
+            break;
+          }
           if (!sseFirstEventReceived) {
             logger.warn(`[feishu-streaming] SSE stream ended or timed out with no events, falling back to polling`);
           }
@@ -911,6 +913,8 @@ const thinkingHeartbeat = setInterval(() => {
               accumulatedText += delta;
 
               if (accumulatedText.length >= CARD_RELAY_THRESHOLD) {
+                streaming.update(accumulatedText);
+                sseProducedText = true;
                 const relayOk = await relayStreamingCard();
                 if (!relayOk) {
                   logger.warn(`[feishu-streaming] Relay failed, continuing on current card (may hit content limit)`);
@@ -942,6 +946,8 @@ const thinkingHeartbeat = setInterval(() => {
                 accumulatedText += delta;
 
                 if (accumulatedText.length >= CARD_RELAY_THRESHOLD) {
+                  streaming.update(accumulatedText);
+                  sseProducedText = true;
                   const relayOk = await relayStreamingCard();
                   if (!relayOk) {
                     logger.warn(`[feishu-streaming] Relay failed, continuing on current card (may hit content limit)`);
@@ -979,12 +985,49 @@ const thinkingHeartbeat = setInterval(() => {
               break;
             }
 
-            if (part.type === "text" && !receivedTextDelta) {
+            if (part.type === "text" && part.synthetic === true) {
+              const syntheticText = part.text as string;
+              logger.info(`[feishu-streaming] SSE synthetic text part detected: textLen=${syntheticText?.length ?? 0}`);
+
+              const completedMatch = syntheticText?.match(/^Background task completed:\s*(.+)/m) ?? null;
+              const failedMatch = syntheticText?.match(/^Background task failed:\s*(.+)/m) ?? null;
+
+              if (completedMatch) {
+                const agentName = (completedMatch[1] ?? "").trim() || "unknown";
+                phase.markCompletedByName(agentName);
+                logger.info(`[feishu-streaming] Background task completed: agent=${agentName}, phase.total=${phase.getTotal()}, phase.isDelegating=${phase.isDelegating()}`);
+                sessionIdle = false;
+              } else if (failedMatch) {
+                const agentName = (failedMatch[1] ?? "").trim() || "unknown";
+                const errorMsg = syntheticText?.match(/<task_error>([\s\S]*?)<\/task_error>/)?.[1]?.trim() ?? "unknown error";
+                phase.markFailedByName(agentName, errorMsg);
+                logger.info(`[feishu-streaming] Background task failed: agent=${agentName}, error=${errorMsg}`);
+                sessionIdle = false;
+              }
+
+              const newNote = phase.buildNote();
+              if (newNote !== lastNote) {
+                lastNote = newNote;
+                if (newNote) streaming.updateNoteContent(newNote);
+              }
+
+              break;
+            }
+
+            // ── Regular text part update ──
+            if (part.type === "text") {
               const newText = part.text as string;
               if (newText && newText !== accumulatedText) {
                 accumulatedText = newText;
                 sseProducedText = true;
-                streaming.replaceContent(accumulatedText);
+                if (!receivedTextDelta) {
+                  receivedTextDelta = true;
+                  streaming.replaceContent(accumulatedText);
+                  logger.info(`[feishu-streaming] SSE message.part.updated text: ${accumulatedText.length} chars (first text)`);
+                } else {
+                  streaming.update(accumulatedText);
+                  logger.info(`[feishu-streaming] SSE message.part.updated text: ${accumulatedText.length} chars (updated)`);
+                }
               }
             }
 
@@ -1228,8 +1271,11 @@ if (part.type === "tool") {
       clearInterval(thinkingHeartbeat);
     }
 
-    if (!sseProducedText && !sessionIdle) {
-      logger.info(`[feishu-streaming] SSE did not produce content, falling back to polling for session ${sessionId}`);
+    if (phase.isDelegating() || (!sseProducedText && !sessionIdle)) {
+      const reason = phase.isDelegating()
+        ? `background tasks still running after SSE stream ended (total=${phase.getTotal()}, delegating=true), polling for completion`
+        : `SSE did not produce content, falling back to polling for session ${sessionId}`;
+      logger.info(`[feishu-streaming] ${reason}`);
 
       const POLL_FAST_MS = 300;
       const POLL_SLOW_MS = 1_500;
@@ -1283,10 +1329,10 @@ if (part.type === "tool") {
         }
 
         for (const msg of currentMessages) {
-          if (msg.info?.role !== "assistant") continue;
+          if (msg.info?.role !== "assistant" && msg.info?.role !== "user") continue;
           const agent = (msg.info?.agent ?? msg.agent ?? "") as string;
           if (agent.trim().toLowerCase() === "compaction") continue;
-          const parts = (msg.parts ?? []) as Array<{ type: string; agent?: string; tool?: string; state?: Record<string, unknown>; text?: string }>;
+          const parts = (msg.parts ?? []) as Array<{ type: string; agent?: string; tool?: string; state?: Record<string, unknown>; text?: string; synthetic?: boolean }>;
           if (parts.some((p) => p.type === "compaction")) continue;
           for (const part of parts) {
             if (part.type === "subtask") {
@@ -1294,6 +1340,21 @@ if (part.type === "tool") {
             }
             if (part.type === "tool") {
               handleToolPartUpdate(part as { tool?: string; state?: { status?: string; metadata?: Record<string, unknown>; input?: Record<string, unknown>; error?: string; title?: string }; metadata?: Record<string, unknown> }, phase);
+            }
+            if (part.type === "text" && part.synthetic === true) {
+              const syntheticText = part.text ?? "";
+              const completedMatch = syntheticText.match(/^Background task completed:\s*(.+)/m);
+              const failedMatch = syntheticText.match(/^Background task failed:\s*(.+)/m);
+              if (completedMatch && completedMatch[1]) {
+                const name = completedMatch[1].trim() || "unknown";
+                phase.markCompletedByName(name);
+                logger.info(`[feishu-streaming] Polling: background task completed: ${name}`);
+              } else if (failedMatch && failedMatch[1]) {
+                const name = failedMatch[1].trim() || "unknown";
+                const errorMsg = syntheticText.match(/<task_error>([\s\S]*?)<\/task_error>/)?.[1]?.trim() ?? "unknown error";
+                phase.markFailedByName(name, errorMsg);
+                logger.info(`[feishu-streaming] Polling: background task failed: ${name}`);
+              }
             }
           }
         }
