@@ -644,12 +644,22 @@ if (!this.state || this.closed) return;
     }
   }
 
+  private apiMutex: Promise<void> | null = null;
+
   private async enforceApiRateLimit(): Promise<void> {
-    const elapsed = Date.now() - this.lastApiCallTime;
-    if (elapsed < CARD_API_MIN_INTERVAL_MS) {
-      await new Promise((r) => setTimeout(r, CARD_API_MIN_INTERVAL_MS - elapsed));
+    if (this.apiMutex) {
+      await this.apiMutex;
     }
-    this.lastApiCallTime = Date.now();
+    this.apiMutex = new Promise<void>(async (resolve) => {
+      const elapsed = Date.now() - this.lastApiCallTime;
+      if (elapsed < CARD_API_MIN_INTERVAL_MS) {
+        await new Promise((r) => setTimeout(r, CARD_API_MIN_INTERVAL_MS - elapsed));
+      }
+      this.lastApiCallTime = Date.now();
+      resolve();
+    });
+    await this.apiMutex;
+    this.apiMutex = null;
   }
 
   private canMakeApiCall(): boolean {
