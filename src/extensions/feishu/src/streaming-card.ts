@@ -1,8 +1,11 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import { Agent as UndiciAgent, fetch as undiciFetch } from "undici";
+import { optimizeMarkdownForFeishu, sanitizeTextForCard } from "./feishu-markdown.js";
 
-const STREAMING_UPDATE_THROTTLE_MS = 150;
-const STREAMING_SIGNIFICANT_DELTA_CHARS = 2;
+const STREAMING_UPDATE_THROTTLE_MS = 500;
+const STREAMING_SIGNIFICANT_DELTA_CHARS = 5;
+const CARD_API_BUDGET_PER_SEC = 5;
+const CARD_API_MIN_INTERVAL_MS = Math.floor(1000 / CARD_API_BUDGET_PER_SEC);
 
 const feishuHttpAgent = new UndiciAgent({
   connections: 6,
@@ -139,10 +142,10 @@ export class FeishuStreamingSession {
   private cardTimedOutFlag = false;
   private log?: (msg: string) => void;
   private lastUpdateTime = 0;
+  private lastApiCallTime = 0;
   private pendingText: string | null = null;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private updateThrottleMs = STREAMING_UPDATE_THROTTLE_MS;
-  /** In-flight concurrent API requests — tracked so close() can drain them before finalising. */
   private inFlight = new Set<Promise<void>>();
 
   constructor(client: lark.Client, creds: FeishuStreamingConfig, log?: (msg: string) => void) {
@@ -429,6 +432,7 @@ export class FeishuStreamingSession {
 
   public async keepAlive(): Promise<boolean> {
     if (!this.state || this.closed) return false;
+    if (!this.canMakeApiCall()) return true;
 
     this.state.sequence += 1;
     const seq = this.state.sequence;
@@ -501,11 +505,14 @@ export class FeishuStreamingSession {
   }
 
   public async updateLoadingContent(content: string): Promise<void> {
-    if (!this.state || this.closed) return;
+if (!this.state || this.closed) return;
+    if (!this.canMakeApiCall()) return;
 
     this.state.sequence += 1;
     const seq = this.state.sequence;
     const cardId = this.state.cardId;
+    this.markApiCall();
+    this.markApiCall();
 
     const p = getTenantToken(this.creds).then(async (token) => {
       await undiciFetch(
@@ -570,6 +577,8 @@ export class FeishuStreamingSession {
 
   /** Fire-and-forget card content update with a pre-allocated sequence number. */
   private async fetchContentUpdate(text: string, cardId: string, sequence: number): Promise<void> {
+    await this.enforceApiRateLimit();
+    const optimized = optimizeMarkdownForFeishu(sanitizeTextForCard(text));
     const fetchStart = Date.now();
     const token = await getTenantToken(this.creds);
     const response = await undiciFetch(
@@ -581,7 +590,7 @@ export class FeishuStreamingSession {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          content: text,
+          content: optimized,
           sequence,
           uuid: `s_${cardId}_${sequence}`,
         }),
@@ -590,7 +599,7 @@ export class FeishuStreamingSession {
     );
 
     const elapsed = Date.now() - fetchStart;
-    this.log?.(`fetchContentUpdate seq=${sequence} done: ${elapsed}ms, status=${response.status}, textLen=${text.length}`);
+    this.log?.(`fetchContentUpdate seq=${sequence} done: ${elapsed}ms, status=${response.status}, textLen=${text.length}, optimizedLen=${optimized.length}`);
 
     if (!response.ok) {
       let detail = "";
@@ -613,7 +622,7 @@ export class FeishuStreamingSession {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              content: text,
+              content: optimized,
               sequence,
               uuid: `s_${cardId}_${sequence}_r`,
             }),
@@ -633,6 +642,22 @@ export class FeishuStreamingSession {
         this.log?.(`Card streaming timed out (200850/300309) — card is no longer updatable`);
       }
     }
+  }
+
+  private async enforceApiRateLimit(): Promise<void> {
+    const elapsed = Date.now() - this.lastApiCallTime;
+    if (elapsed < CARD_API_MIN_INTERVAL_MS) {
+      await new Promise((r) => setTimeout(r, CARD_API_MIN_INTERVAL_MS - elapsed));
+    }
+    this.lastApiCallTime = Date.now();
+  }
+
+  private canMakeApiCall(): boolean {
+    return Date.now() - this.lastApiCallTime >= CARD_API_MIN_INTERVAL_MS;
+  }
+
+  private markApiCall(): void {
+    this.lastApiCallTime = Date.now();
   }
 
   /** Track a fire-and-forget request so close() can drain it before finalising. */

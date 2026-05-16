@@ -193,7 +193,7 @@ async function applySecurityPipeline(
  * event handler → `${basePath}/event`, card handler → `${basePath}/card`.
  */
 const REPLY_TIMEOUT_MS = 3_600_000;
-const CARD_RELAY_THRESHOLD = 20_000;
+const CARD_RELAY_THRESHOLD = 12_000;
 
 const activeStreamingSessions = new Map<string, FeishuStreamingSession>();
 
@@ -798,7 +798,7 @@ const thinkingHeartbeat = setInterval(() => {
           streaming.updateLoadingContent(loadingContent);
         }
       }
-    }, 500);
+    }, 1500);
 
     try {
       const sseIterator = eventResult.stream[Symbol.asyncIterator]();
