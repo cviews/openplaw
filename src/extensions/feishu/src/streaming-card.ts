@@ -2,9 +2,9 @@ import * as lark from "@larksuiteoapi/node-sdk";
 import { Agent as UndiciAgent, fetch as undiciFetch } from "undici";
 import { optimizeMarkdownForFeishu, sanitizeTextForCard } from "./feishu-markdown.js";
 
-const STREAMING_UPDATE_THROTTLE_MS = 500;
-const STREAMING_SIGNIFICANT_DELTA_CHARS = 5;
-const CARD_API_BUDGET_PER_SEC = 5;
+const STREAMING_UPDATE_THROTTLE_MS = 150;
+const STREAMING_SIGNIFICANT_DELTA_CHARS = 1;
+const CARD_API_BUDGET_PER_SEC = 12;
 const CARD_API_MIN_INTERVAL_MS = Math.floor(1000 / CARD_API_BUDGET_PER_SEC);
 
 const feishuHttpAgent = new UndiciAgent({
@@ -12,6 +12,9 @@ const feishuHttpAgent = new UndiciAgent({
   pipelining: 1,
   keepAliveTimeout: 60_000,
   keepAliveMaxTimeout: 600_000,
+  connectTimeout: 10_000,
+  headersTimeout: 30_000,
+  bodyTimeout: 30_000,
 });
 
 export type FeishuStreamingConfig = {
@@ -335,10 +338,22 @@ export class FeishuStreamingSession {
     const closeStart = Date.now();
     const inFlightCount = this.inFlight.size;
 
-    // Drain in-flight: ensures streaming updates reach Feishu before freezing the card
-    await Promise.all([...this.inFlight]);
+    // Drain in-flight: ensures streaming updates reach Feishu before freezing the card.
+    // Timeout-guarded: if any in-flight call hangs (e.g. network stall), proceed anyway
+    // after 15s so the card can still be frozen. Stuck promises are abandoned.
+    const DRAIN_TIMEOUT_MS = 15_000;
+    const drainPromise = Promise.all([...this.inFlight]);
+    const timeoutPromise = new Promise<"timeout">((resolve) =>
+      setTimeout(() => resolve("timeout"), DRAIN_TIMEOUT_MS),
+    );
+    const drainResult = await Promise.race([drainPromise, timeoutPromise]);
     const drainMs = Date.now() - closeStart;
-    this.log?.(`close drain: ${inFlightCount} in-flight, ${drainMs}ms`);
+    if (drainResult === "timeout") {
+      this.log?.(`close drain TIMEOUT after ${drainMs}ms: ${this.inFlight.size} calls still stuck, proceeding anyway`);
+      this.inFlight.clear();
+    } else {
+      this.log?.(`close drain: ${inFlightCount} in-flight, ${drainMs}ms`);
+    }
 
     const pendingMerged = mergeStreamingText(this.state.currentText, this.pendingText ?? undefined);
     const text = finalText ? mergeStreamingText(pendingMerged, finalText) : pendingMerged;
@@ -664,7 +679,7 @@ export class FeishuStreamingSession {
       const now = Date.now();
       const recentCalls = this.apiCallTimestamps.filter((t) => now - t < 1000);
       if (recentCalls.length > 0) {
-        this.log?.(`[rate-monitor] API calls in last 1s: ${recentCalls.length}/5 budget, total tracked: ${this.apiCallTimestamps.length}`);
+        this.log?.(`[rate-monitor] API calls in last 1s: ${recentCalls.length}/${CARD_API_BUDGET_PER_SEC} budget, total tracked: ${this.apiCallTimestamps.length}`);
         this.apiCallTimestamps = this.apiCallTimestamps.filter((t) => now - t < 5000);
       }
     }, 1000);
@@ -686,19 +701,17 @@ export class FeishuStreamingSession {
   }
 
   private async enforceApiRateLimit(): Promise<void> {
-    // Chain onto the existing mutex — guarantees true serialization
+    const previousMutex = this.apiMutex;
     let release!: () => void;
-    const next = this.apiMutex.then(() => new Promise<void>((r) => { release = r; }));
-    this.apiMutex = next;
-    await next; // Wait for all previous callers to finish + our turn to start
+    this.apiMutex = new Promise<void>((r) => { release = r; });
+    await previousMutex;
 
-    // Now we're the ONLY caller executing
     const elapsed = Date.now() - this.lastApiCallTime;
     if (elapsed < CARD_API_MIN_INTERVAL_MS) {
       await new Promise((r) => setTimeout(r, CARD_API_MIN_INTERVAL_MS - elapsed));
     }
     this.recordApiCall();
-    release(); // Let the next caller in the chain proceed
+    release();
   }
 
   private canMakeApiCall(): boolean {
