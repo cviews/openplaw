@@ -1,7 +1,7 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import { Agent as UndiciAgent, fetch as undiciFetch } from "undici";
 
-const STREAMING_UPDATE_THROTTLE_MS = 50;
+const STREAMING_UPDATE_THROTTLE_MS = 150;
 const STREAMING_SIGNIFICANT_DELTA_CHARS = 2;
 
 const feishuHttpAgent = new UndiciAgent({
@@ -136,6 +136,7 @@ export class FeishuStreamingSession {
   private creds: FeishuStreamingConfig;
   private state: CardState | null = null;
   private closed = false;
+  private cardTimedOutFlag = false;
   private log?: (msg: string) => void;
   private lastUpdateTime = 0;
   private pendingText: string | null = null;
@@ -422,10 +423,54 @@ export class FeishuStreamingSession {
     return this.state !== null && !this.closed;
   }
 
-  /**
-   * Fire-and-forget note content update during streaming.
-   * Pre-allocates sequence synchronously, then fires fetch concurrently.
-   */
+  isCardTimedOut(): boolean {
+    return this.cardTimedOutFlag;
+  }
+
+  public async keepAlive(): Promise<boolean> {
+    if (!this.state || this.closed) return false;
+
+    this.state.sequence += 1;
+    const seq = this.state.sequence;
+    const cardId = this.state.cardId;
+
+    const token = await getTenantToken(this.creds);
+    const response = await undiciFetch(
+      `https://open.feishu.cn/open-apis/cardkit/v1/cards/${cardId}/settings`,
+      {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify({
+          settings: JSON.stringify({
+            config: {
+              streaming_mode: true,
+              streaming_config: {
+                print_frequency_ms: { default: 15 },
+                print_step: { default: 1 },
+                print_strategy: "fast",
+              },
+            },
+          }),
+          sequence: seq,
+          uuid: `k_${cardId}_${seq}`,
+        }),
+        dispatcher: feishuHttpAgent,
+      },
+    );
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      this.log?.(`keepAlive failed with HTTP ${response.status}: ${detail}`);
+      return false;
+    }
+
+    this.log?.(`keepAlive: streaming_mode reset (seq ${seq})`);
+    return true;
+  }
+
   public async updateNoteContent(note: string): Promise<void> {
     if (!this.state || this.closed) return;
 
@@ -548,7 +593,45 @@ export class FeishuStreamingSession {
     this.log?.(`fetchContentUpdate seq=${sequence} done: ${elapsed}ms, status=${response.status}, textLen=${text.length}`);
 
     if (!response.ok) {
-      this.log?.(`Update content failed with HTTP ${response.status} (seq ${sequence})`);
+      let detail = "";
+      try {
+        detail = await response.text();
+      } catch { /* ignore */ }
+      this.log?.(`Update content failed with HTTP ${response.status} (seq ${sequence}): ${detail}`);
+
+      // Frequency limit (99991400): auto-throttle and retry once
+      if (detail.includes("99991400") || detail.includes("frequency limit")) {
+        this.updateThrottleMs = Math.min(this.updateThrottleMs * 2, 2000);
+        this.log?.(`Frequency limit hit — auto-throttled to ${this.updateThrottleMs}ms, retrying seq ${sequence}`);
+        await new Promise((r) => setTimeout(r, this.updateThrottleMs));
+        const retryRes = await undiciFetch(
+          `https://open.feishu.cn/open-apis/cardkit/v1/cards/${cardId}/elements/content/content`,
+          {
+            method: "PUT",
+            headers: {
+              Authorization: `Bearer ${await getTenantToken(this.creds)}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              content: text,
+              sequence,
+              uuid: `s_${cardId}_${sequence}_r`,
+            }),
+            dispatcher: feishuHttpAgent,
+          },
+        );
+        if (!retryRes.ok) {
+          const retryDetail = await retryRes.text().catch(() => "");
+          this.log?.(`Retry seq ${sequence} also failed: HTTP ${retryRes.status}: ${retryDetail}`);
+        } else {
+          this.log?.(`Retry seq ${sequence} succeeded`);
+        }
+      }
+
+      if (response.status === 400 && (detail.includes("200850") || detail.includes("300309"))) {
+        this.cardTimedOutFlag = true;
+        this.log?.(`Card streaming timed out (200850/300309) — card is no longer updatable`);
+      }
     }
   }
 

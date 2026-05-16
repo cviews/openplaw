@@ -193,9 +193,7 @@ async function applySecurityPipeline(
  * event handler → `${basePath}/event`, card handler → `${basePath}/card`.
  */
 const REPLY_TIMEOUT_MS = 3_600_000;
-const CARD_CONTENT_TRUNCATE_THRESHOLD = 8_000;
-const CARD_CONTENT_LIMIT = 25_000;
-const FOLLOW_UP_CHUNK_SIZE = 4_000;
+const CARD_RELAY_THRESHOLD = 20_000;
 
 const activeStreamingSessions = new Map<string, FeishuStreamingSession>();
 
@@ -221,29 +219,57 @@ type AgentPhase = {
 
 class PhaseTracker {
   private pendingAgents = new Map<string, AgentPhase>();
-  private completedAgents = new Set<string>();
+  private completedAgents: string[] = [];
   private failedAgents = new Map<string, string>();
   private totalDelegations = 0;
+  private nextId = 0;
 
-  addPending(agentName: string): void {
-    if (!this.completedAgents.has(agentName) && !this.pendingAgents.has(agentName)) {
-      this.pendingAgents.set(agentName, { name: agentName, startTime: Date.now() });
-      this.totalDelegations++;
+  addPending(agentName: string): string {
+    const id = `${agentName}_${this.nextId++}`;
+    this.pendingAgents.set(id, { name: agentName, startTime: Date.now() });
+    this.totalDelegations++;
+    return id;
+  }
+
+  markCompleted(id: string): void {
+    this.pendingAgents.delete(id);
+    this.completedAgents.push(id);
+  }
+
+  markCompletedByName(agentName: string): void {
+    for (const [id, phase] of this.pendingAgents) {
+      if (phase.name === agentName) {
+        this.pendingAgents.delete(id);
+        this.completedAgents.push(id);
+        return;
+      }
     }
   }
 
-  markCompleted(agentName: string): void {
-    this.pendingAgents.delete(agentName);
-    this.completedAgents.add(agentName);
+  markFailed(id: string, error: string): void {
+    this.pendingAgents.delete(id);
+    this.failedAgents.set(id, error);
   }
 
-  markFailed(agentName: string, error: string): void {
-    this.pendingAgents.delete(agentName);
-    this.failedAgents.set(agentName, error);
+  markFailedByName(agentName: string, error: string): void {
+    for (const [id, phase] of this.pendingAgents) {
+      if (phase.name === agentName) {
+        this.pendingAgents.delete(id);
+        this.failedAgents.set(id, error);
+        return;
+      }
+    }
   }
 
   isDelegating(): boolean {
     return this.pendingAgents.size > 0;
+  }
+
+  hasPendingWithName(agentName: string): boolean {
+    for (const [, phase] of this.pendingAgents) {
+      if (phase.name === agentName) return true;
+    }
+    return false;
   }
 
   allDone(): boolean {
@@ -255,7 +281,7 @@ class PhaseTracker {
   }
 
   getCompletedCount(): number {
-    return this.completedAgents.size;
+    return this.completedAgents.length;
   }
 
   getPendingNames(): string[] {
@@ -271,22 +297,26 @@ class PhaseTracker {
     if (this.totalDelegations === 0) return "";
 
     const parts: string[] = [];
-    const completedCount = this.completedAgents.size;
+    const completedCount = this.completedAgents.length;
     const total = this.totalDelegations;
+    const pendingCount = this.pendingAgents.size;
 
-    if (this.pendingAgents.size > 0) {
-      const pendingNames = this.getPendingNames();
-      const elapsed = this.getElapsedMsForFirstPending();
-      let pendingLabel = `🔍 ${pendingNames.join(", ")} 正在执行`;
-      if (elapsed > 60_000) {
-        const minutes = Math.round(elapsed / 60_000);
-        pendingLabel += ` (已等${minutes}分钟)`;
+    if (pendingCount > 0 || completedCount > 0) {
+      let statusLabel = `🔍 子任务`;
+      if (completedCount > 0 && pendingCount > 0) {
+        statusLabel += `: 已完成${completedCount}个, 执行中${pendingCount}个(共${total}个)`;
+      } else if (completedCount > 0) {
+        statusLabel = `✅ 已完成${completedCount}个子任务(共${total}个)`;
+      } else {
+        statusLabel += `: 执行中${pendingCount}个(共${total}个)`;
       }
-      parts.push(pendingLabel);
-    }
-
-    if (this.completedAgents.size > 0) {
-      parts.push(`✅ ${completedCount}/${total} 完成`);
+      if (pendingCount > 0) {
+        const elapsed = this.getElapsedMsForFirstPending();
+        if (elapsed > 60_000) {
+          statusLabel += ` (已等${formatElapsed(elapsed)})`;
+        }
+      }
+      parts.push(statusLabel);
     }
 
     if (this.failedAgents.size > 0) {
@@ -300,13 +330,13 @@ class PhaseTracker {
   buildFinalNote(): string {
     if (this.totalDelegations === 0) return "✅ 完成";
     const total = this.totalDelegations;
-    const completed = this.completedAgents.size;
+    const completed = this.completedAgents.length;
     const failed = this.failedAgents.size;
 
     if (failed > 0) {
-      return `⚠️ 完成 (${completed}/${total} 成功, ${failed} 失败)`;
+      return `⚠️ 完成 (${completed}个成功/${total}个子任务, ${failed}个失败)`;
     }
-    return `✅ 完成 (${completed}/${total} 子任务)`;
+    return `✅ 完成 (${completed}个子任务)`;
   }
 }
 
@@ -404,118 +434,6 @@ class ThinkingTracker {
 
 // ─── Content Display Strategy ────────────────────────────────────────
 
-type DisplayStrategy =
-  | { type: "full"; cardContent: string }
-  | { type: "truncate"; cardContent: string; followUp: string }
-  | { type: "summary"; cardContent: string; followUp: string };
-
-function extractSummaryFromLongContent(content: string): string {
-  const lines = content.split("\n");
-  const summaryLines: string[] = [];
-  let inCodeBlock = false;
-  let codeBlockCount = 0;
-
-  for (const line of lines) {
-    if (line.startsWith("```")) {
-      if (!inCodeBlock) {
-        codeBlockCount++;
-        summaryLines.push(line);
-        summaryLines.push(`... (代码改动详情见下方消息)`);
-      }
-      inCodeBlock = !inCodeBlock;
-      continue;
-    }
-    if (!inCodeBlock) {
-      summaryLines.push(line);
-    }
-  }
-
-  const summary = summaryLines.join("\n");
-  if (summary.length > CARD_CONTENT_TRUNCATE_THRESHOLD) {
-    return summary.slice(0, CARD_CONTENT_TRUNCATE_THRESHOLD) + "\n\n...";
-  }
-  return summary;
-}
-
-function chooseDisplayStrategy(finalText: string): DisplayStrategy {
-  if (finalText.length <= CARD_CONTENT_TRUNCATE_THRESHOLD) {
-    return { type: "full", cardContent: finalText };
-  }
-
-  if (finalText.length <= CARD_CONTENT_LIMIT) {
-    const cardContent =
-      finalText.slice(0, CARD_CONTENT_TRUNCATE_THRESHOLD) +
-      "\n\n---\n💡 **内容过长，完整改动结果见下方消息**";
-    return { type: "truncate", cardContent, followUp: finalText };
-  }
-
-  const summary = extractSummaryFromLongContent(finalText);
-  const cardContent =
-    summary + "\n\n---\n💡 **完整代码改动见下方消息**";
-  return { type: "summary", cardContent, followUp: finalText };
-}
-
-function splitIntoChunks(text: string, chunkSize: number): string[] {
-  const chunks: string[] = [];
-  let offset = 0;
-  while (offset < text.length) {
-    chunks.push(text.slice(offset, offset + chunkSize));
-    offset += chunkSize;
-  }
-  return chunks;
-}
-
-async function sendFollowUpMessage(
-  larkClient: lark.Client,
-  chatId: string,
-  fullContent: string,
-): Promise<void> {
-  if (fullContent.length <= FOLLOW_UP_CHUNK_SIZE) {
-    const data: {
-      receive_id: string;
-      msg_type: string;
-      content: string;
-      disable_robot_notification?: boolean;
-    } = {
-      receive_id: chatId,
-      msg_type: "text",
-      content: JSON.stringify({ text: `📋 完整结果：\n${fullContent}` }),
-      disable_robot_notification: true,
-    };
-    await larkClient.im.message.create({
-      params: { receive_id_type: "chat_id" },
-      data,
-    });
-    return;
-  }
-
-  const chunks = splitIntoChunks(fullContent, FOLLOW_UP_CHUNK_SIZE);
-  for (let i = 0; i < chunks.length; i++) {
-    const prefix =
-      i === 0
-        ? `📋 完整结果 (${chunks.length} 条消息)：\n`
-        : `📋 续 (${i + 1}/${chunks.length})：\n`;
-    const data: {
-      receive_id: string;
-      msg_type: string;
-      content: string;
-      disable_robot_notification?: boolean;
-    } = {
-      receive_id: chatId,
-      msg_type: "text",
-      content: JSON.stringify({ text: `${prefix}${chunks[i]}` }),
-      disable_robot_notification: true,
-    };
-    await larkClient.im.message.create({
-      params: { receive_id_type: "chat_id" },
-      data,
-    });
-    if (i < chunks.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  }
-}
-
 // ─── Subtask / Tool Part Detection ───────────────────────────────────
 
 function handleToolPartUpdate(part: { tool?: string; state?: { status?: string; metadata?: Record<string, unknown>; input?: Record<string, unknown>; error?: string; title?: string } }, phase: PhaseTracker): void {
@@ -532,9 +450,19 @@ function handleToolPartUpdate(part: { tool?: string; state?: { status?: string; 
   const titleMatch = (state.title ?? "").match(/委派\s*(\S+)\s*处理/);
   const agentName = String(target ?? titleMatch?.[1] ?? "unknown");
 
+  const isBackground =
+    (state.metadata?.background as boolean) ?? (state.input as Record<string, unknown>)?.background as boolean ?? false;
+
   if (status === "running") phase.addPending(agentName);
-  if (status === "completed") phase.markCompleted(agentName);
-  if (status === "error") phase.markFailed(agentName, state.error ?? "unknown error");
+  if (status === "completed" && !isBackground) phase.markCompletedByName(agentName);
+  if (status === "completed" && isBackground) {
+    if (!phase.hasPendingWithName(agentName)) {
+      phase.addPending(agentName);
+      logger.info(`[feishu-streaming] Background task completed but no pending entry yet, added ${agentName} as pending`);
+    }
+    logger.info(`[feishu-streaming] Background task tool completed (started child agent), keeping ${agentName} as pending until child results arrive`);
+  }
+  if (status === "error") phase.markFailedByName(agentName, state.error ?? "unknown error");
 }
 
 function extractLastAssistantText(messages: any[]): string {  const assistantMsgs = messages.filter(
@@ -556,6 +484,16 @@ function extractLastAssistantText(messages: any[]): string {  const assistantMsg
     }
   }
   return parts.join("\n");
+}
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}小时${minutes}分${seconds}秒`;
+  if (minutes > 0) return `${minutes}分钟${seconds}秒`;
+  return `${seconds}秒`;
 }
 
 type ErrorCategory = "quota" | "rate_limit" | "auth" | "network" | "context_overflow" | "output_length" | "aborted" | "unknown";
@@ -609,7 +547,7 @@ async function streamAgentReply(
   directory?: string,
 ): Promise<void> {
   logger.info(`[feishu-streaming] Starting streamAgentReply: sessionId=${sessionId}, chatId=${chatId}, directory=${directory ?? "none"}`);
-  const streaming = new FeishuStreamingSession(larkClient, creds, (msg) =>
+  let streaming = new FeishuStreamingSession(larkClient, creds, (msg) =>
     logger.info(`[feishu-streaming] ${msg}`),
   );
 
@@ -636,6 +574,7 @@ async function streamAgentReply(
     let sessionIdle = false;
 
     let sseProducedText = false;
+    let relayIndex = 0;
 
     const sseStart = Date.now();
     const eventResult = await opencodeClient.global.event({
@@ -654,6 +593,88 @@ async function streamAgentReply(
     let isCompacting = false;
     let compactReason: "auto" | "manual" = "auto";
 
+    const STREAMING_KEEPALIVE_INTERVAL_MS = 9 * 60 * 1000;
+    let lastKeepAliveMs = sseStart;
+    let cardTimedOut = false;
+
+    async function ensureActiveStreamingCard(): Promise<boolean> {
+      if (!cardTimedOut && !streaming.isCardTimedOut()) return true;
+
+      logger.warn(`[feishu-streaming] Card timed out, creating new streaming card for chatId=${chatId}`);
+
+      const oldText = accumulatedText;
+      const newStreaming = new FeishuStreamingSession(larkClient, creds, (msg) =>
+        logger.info(`[feishu-streaming] ${msg}`),
+      );
+
+      try {
+        await newStreaming.warmTokenCache();
+        await newStreaming.start(chatId, "chat_id", {
+          replyToMessageId: messageId,
+        });
+
+        const statusContent = oldText
+          ? `${oldText}\n\n---\n⏳ 继续等待子任务完成...`
+          : "⏳ 子任务仍在执行，完成后会继续更新";
+        newStreaming.replaceContent(statusContent);
+
+        activeStreamingSessions.set(chatId, newStreaming);
+        streaming = newStreaming;
+
+        cardTimedOut = false;
+        lastKeepAliveMs = Date.now();
+        lastThinkingDisplay = "";
+        lastLoadingContent = "";
+
+        logger.info(`[feishu-streaming] New streaming card created after timeout`);
+        return true;
+      } catch (e) {
+        logger.error(`[feishu-streaming] Failed to create new streaming card: ${String(e)}`);
+        return false;
+      }
+    }
+
+    async function relayStreamingCard(): Promise<boolean> {
+      relayIndex++;
+      logger.info(`[feishu-streaming] Content approaching limit (${accumulatedText.length} chars), relaying to new card (part ${relayIndex + 1})`);
+
+      try {
+        await streaming.close(`📋 第${relayIndex}部分已完成，见下条消息继续`, { note: "内容过长，自动分片显示" });
+      } catch (e) {
+        logger.warn(`[feishu-streaming] Close old card during relay failed: ${String(e)}`);
+      }
+
+      const newStreaming = new FeishuStreamingSession(larkClient, creds, (msg) =>
+        logger.info(`[feishu-streaming] ${msg}`),
+      );
+
+      try {
+        await newStreaming.warmTokenCache();
+        await newStreaming.start(chatId, "chat_id", {
+          replyToMessageId: messageId,
+          header: { title: `第${relayIndex + 1}部分（续）`, template: "blue" },
+        });
+
+        activeStreamingSessions.set(chatId, newStreaming);
+        streaming = newStreaming;
+
+        cardTimedOut = false;
+        lastKeepAliveMs = Date.now();
+        lastThinkingDisplay = "";
+        lastLoadingContent = "";
+        lastNote = "";
+        accumulatedText = "";
+        receivedTextDelta = false;
+        sseProducedText = false;
+
+        logger.info(`[feishu-streaming] New relay card created (part ${relayIndex + 1})`);
+        return true;
+      } catch (e) {
+        logger.error(`[feishu-streaming] Failed to create relay card: ${String(e)}`);
+        return false;
+      }
+    }
+
     const SSE_INITIAL_TIMEOUT_MS = 8_000;
     let sseFirstEventReceived = false;
 
@@ -664,13 +685,30 @@ const LOADING_DOTS = ["", ".", "..", "..."];
 
 const thinkingHeartbeat = setInterval(() => {
       if (!streaming.isActive()) return;
+
+      if (!cardTimedOut && Date.now() - lastKeepAliveMs >= STREAMING_KEEPALIVE_INTERVAL_MS) {
+        lastKeepAliveMs = Date.now();
+        streaming.keepAlive().then((ok) => {
+          if (!ok) {
+            cardTimedOut = true;
+            logger.warn(`[feishu-streaming] keepAlive failed, card may have timed out — will create new card on next content update`);
+          } else {
+            logger.info(`[feishu-streaming] keepAlive: streaming_mode reset`);
+          }
+        }).catch((e) => {
+          cardTimedOut = true;
+          logger.warn(`[feishu-streaming] keepAlive error: ${String(e)} — will create new card on next content update`);
+        });
+      }
+
       loadingDotsIndex = (loadingDotsIndex + 1) % LOADING_DOTS.length;
       const dots = LOADING_DOTS[loadingDotsIndex];
 
       if (!receivedTextDelta) {
         if (isCompacting) {
           const compactLabel = compactReason === "auto" ? "自动压缩上下文" : "压缩上下文";
-          const cardContent = `🔄 ${compactLabel}${dots}\n请稍候，压缩完成后继续回复...`;
+          const elapsed = formatElapsed(Date.now() - sseStart);
+          const cardContent = `🔄 ${compactLabel}${dots} (${elapsed})\n上下文过长，正在压缩以继续回复...`;
           if (cardContent !== lastThinkingDisplay) {
             lastThinkingDisplay = cardContent;
             streaming.replaceContent(cardContent);
@@ -690,15 +728,16 @@ const thinkingHeartbeat = setInterval(() => {
       } else {
         const thinkingDisplay = thinking.buildDisplay();
         const phaseNote = phase.buildNote();
+        const elapsed = formatElapsed(Date.now() - sseStart);
         let loadingContent = "";
         if (isCompacting) {
-          loadingContent = `🔄 压缩中${dots}`;
+          loadingContent = `🔄 上下文过长，正在${dots} (${elapsed})`;
         } else if (thinkingDisplay) {
-          loadingContent = `${thinkingDisplay}\n⏳ 思考${dots}`;
+          loadingContent = `${thinkingDisplay}\n⏳ 思考${dots} (${elapsed})`;
         } else if (phaseNote) {
-          loadingContent = `${phaseNote}\n⏳ 处理中${dots}`;
+          loadingContent = `${phaseNote}\n⏳ 处理中${dots} (${elapsed})`;
         } else {
-          loadingContent = `⏳${dots}`;
+          loadingContent = `⏳ 等待回复${dots} (${elapsed})`;
         }
         if (loadingContent !== lastLoadingContent) {
           lastLoadingContent = loadingContent;
@@ -737,6 +776,7 @@ const thinkingHeartbeat = setInterval(() => {
         }
 
         if (iteratorResult.done) {
+          logger.info(`[feishu-streaming] SSE stream ended (iteratorResult.done), sessionDone=${sessionDone}, sessionIdle=${sessionIdle}, sseProducedText=${sseProducedText}, phase.isDelegating=${phase.isDelegating()}, phase.total=${phase.getTotal()}, accumulatedText.length=${accumulatedText.length}`);
           if (!sseFirstEventReceived) {
             logger.warn(`[feishu-streaming] SSE stream ended or timed out with no events, falling back to polling`);
           }
@@ -756,6 +796,14 @@ const thinkingHeartbeat = setInterval(() => {
         if (directory && event.directory !== directory) {
           logger.debug(`[feishu-streaming] SSE event filtered by directory: eventDir=${event.directory ?? 'none'}, expectedDir=${directory}`);
           continue;
+        }
+
+        if (cardTimedOut || streaming.isCardTimedOut()) {
+          const ok = await ensureActiveStreamingCard();
+          if (!ok) {
+            logger.warn(`[feishu-streaming] Cannot create new card, skipping event: ${payloadType}`);
+            continue;
+          }
         }
 
         switch (payloadType) {
@@ -791,6 +839,7 @@ const thinkingHeartbeat = setInterval(() => {
             if (payloadSessionId === sessionId) {
               isCompacting = false;
               lastThinkingDisplay = "";
+              lastLoadingContent = "";
               logger.info(`[feishu-streaming] SSE compaction ended, resuming normal display`);
             }
             break;
@@ -804,6 +853,15 @@ const thinkingHeartbeat = setInterval(() => {
               }
               const delta = (props.delta as string) ?? (payload.delta as string) ?? "";
               accumulatedText += delta;
+
+              if (accumulatedText.length >= CARD_RELAY_THRESHOLD) {
+                const relayOk = await relayStreamingCard();
+                if (!relayOk) {
+                  logger.warn(`[feishu-streaming] Relay failed, continuing on current card (may hit content limit)`);
+                }
+                break;
+              }
+
               if (!receivedTextDelta) {
                 receivedTextDelta = true;
                 streaming.replaceContent(accumulatedText);
@@ -826,6 +884,15 @@ const thinkingHeartbeat = setInterval(() => {
               const delta = (props.delta as string) ?? (payload.delta as string) ?? "";
               if (delta) {
                 accumulatedText += delta;
+
+                if (accumulatedText.length >= CARD_RELAY_THRESHOLD) {
+                  const relayOk = await relayStreamingCard();
+                  if (!relayOk) {
+                    logger.warn(`[feishu-streaming] Relay failed, continuing on current card (may hit content limit)`);
+                  }
+                  break;
+                }
+
                 if (!receivedTextDelta) {
                   receivedTextDelta = true;
                   streaming.replaceContent(accumulatedText);
@@ -902,13 +969,16 @@ if (part.type === "tool") {
                 loadingDotsIndex = (loadingDotsIndex + 1) % LOADING_DOTS.length;
                 const dots = LOADING_DOTS[loadingDotsIndex];
                 const thinkingDisplay = thinking.buildDisplay();
+                const elapsed = formatElapsed(Date.now() - sseStart);
                 let loadingContent = "";
-                if (thinkingDisplay) {
-                  loadingContent = `${thinkingDisplay}\n⏳ 思考${dots}`;
+                if (isCompacting) {
+                  loadingContent = `🔄 上下文过长，正在${dots} (${elapsed})`;
+                } else if (thinkingDisplay) {
+                  loadingContent = `${thinkingDisplay}\n⏳ 思考${dots} (${elapsed})`;
                 } else if (newNote) {
-                  loadingContent = `${newNote}\n⏳ 处理中${dots}`;
-                } else {
-                  loadingContent = `⏳${dots}`;
+                  loadingContent = `${newNote}\n⏳ 处理中${dots} (${elapsed})`;
+} else {
+          loadingContent = `⏳ 等待回复${dots} (${elapsed})`;
                 }
                 if (loadingContent !== lastLoadingContent) {
                   lastLoadingContent = loadingContent;
@@ -950,8 +1020,24 @@ if (part.type === "tool") {
               const info = (props.info as Record<string, unknown>) ?? (payload.info as Record<string, unknown>);
               const agent = (info?.agent as string) ?? (props.agent as string) ?? (payload.agent as string) ?? "";
               if (agent.trim().toLowerCase() === "compaction") {
-                isCompacting = true;
-                logger.info(`[feishu-streaming] SSE compaction message detected (agent=compaction)`);
+                const messageError = (info?.error as Record<string, unknown>) ?? (props.error as Record<string, unknown>) ?? (payload.error as Record<string, unknown>);
+                if (messageError) {
+                  const errorMsg = (messageError.message as string) ?? (messageError.name as string) ?? String(messageError);
+                  isCompacting = false;
+                  lastThinkingDisplay = "";
+                  lastLoadingContent = "";
+                  const userMsg = `❌ 上下文压缩失败：${errorMsg}`;
+                  if (!receivedTextDelta) {
+                    streaming.replaceContent(userMsg);
+                  } else {
+                    streaming.updateLoadingContent("");
+                    streaming.update(accumulatedText);
+                  }
+                  logger.warn(`[feishu-streaming] SSE compaction failed: ${errorMsg}`);
+                } else {
+                  isCompacting = true;
+                  logger.info(`[feishu-streaming] SSE compaction message detected (agent=compaction)`);
+                }
                 break;
               }
               if (isCompacting) {
@@ -985,9 +1071,16 @@ if (part.type === "tool") {
 
           case "session.idle": {
             if (payloadSessionId === sessionId) {
-              logger.info(`[feishu-streaming] SSE session idle, closing: sessionId=${sessionId}`);
-              sessionDone = true;
-              sessionIdle = true;
+              logger.info(`[feishu-streaming] SSE session idle: isCompacting=${isCompacting}, phase.isDelegating=${phase.isDelegating()}, phase.total=${phase.getTotal()}, phase.pending=${JSON.stringify(phase.getPendingNames())}`);
+              if (isCompacting) {
+                logger.info(`[feishu-streaming] SSE session idle while compacting, not closing yet`);
+              } else if (phase.isDelegating()) {
+                logger.info(`[feishu-streaming] SSE session idle while delegating subtasks, not closing yet`);
+              } else {
+                logger.info(`[feishu-streaming] SSE session idle, closing: sessionId=${sessionId}`);
+                sessionDone = true;
+                sessionIdle = true;
+              }
             }
             break;
           }
@@ -1022,10 +1115,17 @@ if (part.type === "tool") {
                 const errorMsg = (errorData.message as string) ?? (error.message as string) ?? String(error);
                 const statusCode = (errorData.statusCode as number) ?? (errorData.status as number);
                 lastError = errorMsg;
+                if (isCompacting) {
+                  isCompacting = false;
+                  lastThinkingDisplay = "";
+                  lastLoadingContent = "";
+                  logger.warn(`[feishu-streaming] SSE session error during compaction: ${errorName} - ${errorMsg}`);
+                }
                 const userMsg = classifyErrorForUser(errorName, errorMsg, statusCode);
                 if (!receivedTextDelta) {
                   streaming.replaceContent(userMsg);
                 } else {
+                  streaming.updateLoadingContent("");
                   streaming.update(userMsg);
                 }
                 logger.warn(`[feishu-streaming] SSE session error: ${errorName} - ${errorMsg}`);
@@ -1050,8 +1150,9 @@ if (part.type === "tool") {
       clearInterval(thinkingHeartbeat);
     }
 
-    if (!sseProducedText && !sessionIdle) {
-      logger.info(`[feishu-streaming] SSE did not produce content, falling back to polling for session ${sessionId}`);
+    if ((!sseProducedText && !sessionIdle) || (phase.isDelegating() && !sessionDone)) {
+      const reason = !sseProducedText && !sessionIdle ? "SSE did not produce content" : "subtasks still running after SSE ended";
+      logger.info(`[feishu-streaming] Falling back to polling for session ${sessionId}: ${reason}, phase.total=${phase.getTotal()}, phase.pending=${JSON.stringify(phase.getPendingNames())}`);
 
       const POLL_FAST_MS = 300;
       const POLL_SLOW_MS = 1_500;
@@ -1152,29 +1253,24 @@ if (part.type === "tool") {
       logger.warn(`[feishu-streaming] No content received for session ${sessionId}`);
     }
 
-    // ── Choose display strategy & close ────────────────────────────────
+    // ── Close final streaming card ────────────────────────────────
     const finalNote = phase.buildFinalNote();
-    const displayResult = accumulatedText ? chooseDisplayStrategy(accumulatedText) : null;
-
-    if (displayResult) {
-      await streaming.close(displayResult.cardContent, { note: finalNote });
-      activeStreamingSessions.delete(chatId);
-      if (displayResult.type !== "full" && displayResult.followUp) {
-        await sendFollowUpMessage(larkClient, chatId, displayResult.followUp);
-      }
+    if (relayIndex > 0) {
+      const relayNote = finalNote ? `${finalNote} · 第${relayIndex + 1}部分(共${relayIndex + 1}部分)` : `第${relayIndex + 1}部分(共${relayIndex + 1}部分)`;
+      await streaming.close(accumulatedText || "✅ 完成", { note: relayNote });
+    } else if (accumulatedText) {
+      await streaming.close(accumulatedText, { note: finalNote });
+    } else if (lastError) {
+      const userMsg = classifyErrorForUser("", lastError);
+      await streaming.close(userMsg, { note: "❌ 执行失败" });
     } else {
-      if (lastError) {
-        const userMsg = classifyErrorForUser("", lastError);
-        await streaming.close(userMsg, { note: "❌ 执行失败" });
-      } else {
-        const elapsed = Math.round((Date.now() - startTime) / 60_000);
-        await streaming.close(
-          `⚠️ 执行超时 (已运行${elapsed}分钟)，Agent仍在后台继续。请稍后再问一次获取结果。`,
-          { note: "⚠️ 超时" },
-        );
-      }
-      activeStreamingSessions.delete(chatId);
+      const elapsed = Math.round((Date.now() - startTime) / 60_000);
+      await streaming.close(
+        `⚠️ 执行超时 (已运行${elapsed}分钟)，Agent仍在后台继续。请稍后再问一次获取结果。`,
+        { note: "⚠️ 超时" },
+      );
     }
+    activeStreamingSessions.delete(chatId);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     const errCauses: string[] = [];
