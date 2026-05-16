@@ -193,21 +193,55 @@ async function applySecurityPipeline(
  * event handler → `${basePath}/event`, card handler → `${basePath}/card`.
  */
 const REPLY_TIMEOUT_MS = 3_600_000;
-const CARD_RELAY_THRESHOLD = 12_000;
+const CARD_RELAY_THRESHOLD = 4_000;
 
-const activeStreamingSessions = new Map<string, FeishuStreamingSession>();
+type ActiveStreamingEntry = {
+  session: FeishuStreamingSession;
+  sessionId: string;
+  opencodeClient: OpencodeClient;
+  directory?: string;
+};
 
-async function closeActiveStreamingSession(chatId: string): Promise<void> {
+const activeStreamingSessions = new Map<string, ActiveStreamingEntry>();
+
+async function abortAndSendNewMessage(
+  chatId: string,
+  message: string,
+  agentName?: string,
+): Promise<boolean> {
   const existing = activeStreamingSessions.get(chatId);
-  if (existing && existing.isActive()) {
-    logger.info(`[feishu-streaming] Closing previous streaming session for chatId=${chatId} (new message arrived)`);
-    try {
-      await existing.close(undefined, { note: "⏳ 新消息已到达，此任务暂停显示" });
-    } catch {
-      // best-effort close
-    }
-    activeStreamingSessions.delete(chatId);
+  if (!existing) return false;
+
+  logger.info(`[feishu-streaming] Sending new message to session ${existing.sessionId} for chatId=${chatId} (will queue), then aborting current execution`);
+
+  // 1. Queue the new message first (opencode queues it while current execution is running)
+  try {
+    const promptArgs: Record<string, unknown> = {
+      path: { id: existing.sessionId },
+      body: {
+        parts: [{ type: "text", text: message }],
+        ...(agentName ? { agent: agentName } : {}),
+      },
+    };
+    if (existing.directory) promptArgs.query = { directory: existing.directory };
+    await existing.opencodeClient.session.promptAsync(promptArgs as any);
+    logger.info(`[feishu-streaming] New message queued in session ${existing.sessionId}`);
+  } catch (e) {
+    logger.error(`[feishu-streaming] Failed to queue new message in session ${existing.sessionId}: ${String(e)}`);
+    return false;
   }
+
+  // 2. Abort current execution (equivalent to ESC in TUI) — queued message starts immediately
+  try {
+    const abortArgs: Record<string, unknown> = { path: { id: existing.sessionId } };
+    if (existing.directory) abortArgs.query = { directory: existing.directory };
+    await existing.opencodeClient.session.abort(abortArgs as any);
+    logger.info(`[feishu-streaming] Session ${existing.sessionId} aborted, queued message will start immediately`);
+  } catch (e) {
+    logger.warn(`[feishu-streaming] Session abort failed: ${String(e)}, queued message may wait for current execution to finish`);
+  }
+
+  return true;
 }
 
 // ─── Phase Tracker ────────────────────────────────────────────────────
@@ -601,14 +635,13 @@ async function streamAgentReply(
   directory?: string,
 ): Promise<void> {
   logger.info(`[feishu-streaming] Starting streamAgentReply: sessionId=${sessionId}, chatId=${chatId}, directory=${directory ?? "none"}`);
+
   let streaming = new FeishuStreamingSession(larkClient, creds, (msg) =>
     logger.info(`[feishu-streaming] ${msg}`),
   );
 
-  await closeActiveStreamingSession(chatId);
-
-  const phase = new PhaseTracker();
-  const thinking = new ThinkingTracker();
+  let phase = new PhaseTracker();
+  let thinking = new ThinkingTracker();
   const startTime = Date.now();
 
   try {
@@ -620,7 +653,7 @@ async function streamAgentReply(
     });
     logger.info(`[feishu-streaming] streaming.start succeeded for chatId=${chatId}`);
 
-    activeStreamingSessions.set(chatId, streaming);
+    activeStreamingSessions.set(chatId, { session: streaming, sessionId, opencodeClient, directory });
 
     let accumulatedText = "";
     let lastNote = "";
@@ -672,7 +705,7 @@ async function streamAgentReply(
           : "⏳ 子任务仍在执行，完成后会继续更新";
         newStreaming.replaceContent(statusContent);
 
-        activeStreamingSessions.set(chatId, newStreaming);
+        activeStreamingSessions.set(chatId, { session: newStreaming, sessionId, opencodeClient, directory });
         streaming = newStreaming;
 
         cardTimedOut = false;
@@ -709,7 +742,7 @@ async function streamAgentReply(
           header: { title: `第${relayIndex + 1}部分（续）`, template: "blue" },
         });
 
-        activeStreamingSessions.set(chatId, newStreaming);
+        activeStreamingSessions.set(chatId, { session: newStreaming, sessionId, opencodeClient, directory });
         streaming = newStreaming;
 
         cardTimedOut = false;
@@ -1217,6 +1250,25 @@ if (part.type === "tool") {
                 const errorData = (error.data as Record<string, unknown>) ?? {};
                 const errorMsg = (errorData.message as string) ?? (error.message as string) ?? String(error);
                 const statusCode = (errorData.statusCode as number) ?? (errorData.status as number);
+
+                const isUserAbort = errorName === "MessageAbortedError" && activeStreamingSessions.has(chatId);
+                if (isUserAbort) {
+                  logger.info(`[feishu-streaming] SSE MessageAbortedError — user sent new message, waiting for queued response`);
+                  accumulatedText = "";
+                  receivedTextDelta = false;
+                  sseProducedText = false;
+                  sessionIdle = false;
+                  lastError = null;
+                  lastThinkingDisplay = "";
+                  lastLoadingContent = "";
+                  lastNote = "";
+                  isCompacting = false;
+                  phase = new PhaseTracker();
+                  thinking = new ThinkingTracker();
+                  streaming.replaceContent("⏳ 新消息已到达，正在切换处理...");
+                  continue;
+                }
+
                 lastError = errorMsg;
                 if (isCompacting) {
                   isCompacting = false;
@@ -1249,11 +1301,10 @@ if (part.type === "tool") {
             break;
           }
           if (phase.getTotal() === 0 && sseProducedText) {
-            logger.info(`[feishu-streaming] Event-driven close: no subtasks + text produced, session was idle`);
-            sessionDone = true;
-            break;
+            logger.info(`[feishu-streaming] SSE session idle (no subtasks tracked), continuing SSE loop — main agent may still be working`);
+          } else {
+            logger.info(`[feishu-streaming] sessionIdle=true but phase incomplete (total=${phase.getTotal()}, delegating=${phase.isDelegating()}), continuing SSE loop for more events`);
           }
-          logger.info(`[feishu-streaming] sessionIdle=true but phase incomplete (total=${phase.getTotal()}, delegating=${phase.isDelegating()}), continuing SSE loop for more events`);
         }
       }
     } catch (err) {
@@ -1408,7 +1459,8 @@ if (part.type === "tool") {
         { note: "⚠️ 超时" },
       );
     }
-    activeStreamingSessions.delete(chatId);
+    const currentEntry = activeStreamingSessions.get(chatId);
+    if (currentEntry?.session === streaming) activeStreamingSessions.delete(chatId);
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     const errCauses: string[] = [];
@@ -1426,7 +1478,8 @@ if (part.type === "tool") {
       sessionId,
       chatId,
     });
-    activeStreamingSessions.delete(chatId);
+    const currentEntry = activeStreamingSessions.get(chatId);
+    if (currentEntry?.session === streaming) activeStreamingSessions.delete(chatId);
     try {
       await streaming.close(`❌ Error: ${errMsg}`);
     } catch {
@@ -1530,6 +1583,17 @@ export function createFeishuWebhookHandlers(
       const text = stripMentionAt(parseMessageContent(rawContent));
 
       if (!text) return;
+
+      // If this chat already has an active streaming session, abort current execution
+      // and send the new message in the same session (opencode queues + abort like ESC)
+      if (deps.opencodeClient && activeStreamingSessions.has(chatId)) {
+        const abortOk = await abortAndSendNewMessage(chatId, text);
+        if (abortOk) {
+          logger.info(`[feishu-handler] Sent new message to active session for chatId=${chatId}, skipping full trigger+stream`);
+          return;
+        }
+        logger.warn(`[feishu-handler] abortAndSendNewMessage failed for chatId=${chatId}, falling back to full trigger+stream`);
+      }
 
       const accountId = "default";
 
@@ -1739,6 +1803,17 @@ export function createFeishuWebhookHandlersForBot(
       const text = stripMentionAt(parseMessageContent(rawContent));
 
       if (!text) return;
+
+      // If this chat already has an active streaming session, abort current execution
+      // and send the new message in the same session (opencode queues + abort like ESC)
+      if (deps.opencodeClient && activeStreamingSessions.has(chatId)) {
+        const abortOk = await abortAndSendNewMessage(chatId, text, botConfig.agent ?? "main");
+        if (abortOk) {
+          logger.info(`[feishu-handler-bot] Sent new message to active session for chatId=${chatId}, skipping full trigger+stream`);
+          return;
+        }
+        logger.warn(`[feishu-handler-bot] abortAndSendNewMessage failed for chatId=${chatId}, falling back to full trigger+stream`);
+      }
 
       const accountId = botConfig.id;
 
