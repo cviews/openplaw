@@ -268,6 +268,7 @@ export class FeishuStreamingSession {
     };
 
     this.log?.(`Started streaming: cardId=${cardId}, messageId=${sendRes.data.message_id}`);
+    this.startApiCallLogging();
   }
 
   /** Sync state mutation + pre-allocated sequence → fire-and-forget fetch. Handler.ts does NOT await, so API latency never blocks SSE consumption. */
@@ -345,6 +346,7 @@ export class FeishuStreamingSession {
     // Final content update — sequential, awaited for reliability.
     if (text && text !== this.state.currentText) {
       this.state.sequence += 1;
+      await this.enforceApiRateLimit();
       await this.fetchContentUpdate(text, this.state.cardId, this.state.sequence);
       this.state.currentText = text;
     }
@@ -353,6 +355,7 @@ export class FeishuStreamingSession {
     if (options?.note) {
       this.state.sequence += 1;
       const noteSeq = this.state.sequence;
+      await this.enforceApiRateLimit();
       const noteToken = await getTenantToken(this.creds);
       await undiciFetch(
         `https://open.feishu.cn/open-apis/cardkit/v1/cards/${this.state.cardId}/elements/note/content`,
@@ -374,6 +377,7 @@ export class FeishuStreamingSession {
 
     this.state.sequence += 1;
     const loadSeq = this.state.sequence;
+    await this.enforceApiRateLimit();
     const loadToken = await getTenantToken(this.creds);
     await undiciFetch(
       `https://open.feishu.cn/open-apis/cardkit/v1/cards/${this.state.cardId}/elements/loading/content`,
@@ -394,6 +398,7 @@ export class FeishuStreamingSession {
 
     // Disable streaming_mode — the card is now frozen.
     this.state.sequence += 1;
+    await this.enforceApiRateLimit();
     const token = await getTenantToken(this.creds);
     await undiciFetch(`https://open.feishu.cn/open-apis/cardkit/v1/cards/${this.state.cardId}/settings`, {
       method: "PATCH",
@@ -420,6 +425,7 @@ export class FeishuStreamingSession {
     this.pendingText = null;
 
     this.log?.(`close total: ${totalCloseMs}ms, cardId=${finalState.cardId}`);
+    this.stopApiCallLogging();
   }
 
   isActive(): boolean {
@@ -433,6 +439,7 @@ export class FeishuStreamingSession {
   public async keepAlive(): Promise<boolean> {
     if (!this.state || this.closed) return false;
     if (!this.canMakeApiCall()) return true;
+    this.markApiCall();
 
     this.state.sequence += 1;
     const seq = this.state.sequence;
@@ -478,12 +485,12 @@ export class FeishuStreamingSession {
   public async updateNoteContent(note: string): Promise<void> {
     if (!this.state || this.closed) return;
 
-    // Pre-allocate sequence synchronously
     this.state.sequence += 1;
     const seq = this.state.sequence;
     const cardId = this.state.cardId;
 
-    const p = getTenantToken(this.creds).then(async (token) => {
+    const p = this.enforceApiRateLimit().then(async () => {
+      const token = await getTenantToken(this.creds);
       await undiciFetch(
         `https://open.feishu.cn/open-apis/cardkit/v1/cards/${cardId}/elements/note/content`,
         {
@@ -505,16 +512,14 @@ export class FeishuStreamingSession {
   }
 
   public async updateLoadingContent(content: string): Promise<void> {
-if (!this.state || this.closed) return;
-    if (!this.canMakeApiCall()) return;
+    if (!this.state || this.closed) return;
 
     this.state.sequence += 1;
     const seq = this.state.sequence;
     const cardId = this.state.cardId;
-    this.markApiCall();
-    this.markApiCall();
 
-    const p = getTenantToken(this.creds).then(async (token) => {
+    const p = this.enforceApiRateLimit().then(async () => {
+      const token = await getTenantToken(this.creds);
       await undiciFetch(
         `https://open.feishu.cn/open-apis/cardkit/v1/cards/${cardId}/elements/loading/content`,
         {
@@ -542,12 +547,12 @@ if (!this.state || this.closed) return;
   public async updateHeader(title: string, template: string = "blue"): Promise<void> {
     if (!this.state || this.closed) return;
 
-    // Pre-allocate sequence synchronously
     this.state.sequence += 1;
     const seq = this.state.sequence;
     const cardId = this.state.cardId;
 
-    const p = getTenantToken(this.creds).then(async (token) => {
+    const p = this.enforceApiRateLimit().then(async () => {
+      const token = await getTenantToken(this.creds);
       await undiciFetch(
         `https://open.feishu.cn/open-apis/cardkit/v1/cards/${cardId}/settings`,
         {
@@ -644,22 +649,56 @@ if (!this.state || this.closed) return;
     }
   }
 
-  private apiMutex: Promise<void> | null = null;
+  /** Promise-chain mutex: each caller appends itself to the chain, guaranteeing true serialization.
+   *  Unlike `new Promise(async ...)` which runs the executor immediately (concurrent!), this
+   *  pattern ensures only ONE caller is executing at any time. */
+  private apiMutex: Promise<void> = Promise.resolve();
+
+  /** Per-second API call counter for rate-limit diagnostics. */
+  private apiCallTimestamps: number[] = [];
+  private apiCallLogInterval: ReturnType<typeof setInterval> | null = null;
+
+  private startApiCallLogging(): void {
+    if (this.apiCallLogInterval) return;
+    this.apiCallLogInterval = setInterval(() => {
+      const now = Date.now();
+      const recentCalls = this.apiCallTimestamps.filter((t) => now - t < 1000);
+      if (recentCalls.length > 0) {
+        this.log?.(`[rate-monitor] API calls in last 1s: ${recentCalls.length}/5 budget, total tracked: ${this.apiCallTimestamps.length}`);
+        this.apiCallTimestamps = this.apiCallTimestamps.filter((t) => now - t < 5000);
+      }
+    }, 1000);
+  }
+
+  private stopApiCallLogging(): void {
+    if (this.apiCallLogInterval) {
+      clearInterval(this.apiCallLogInterval);
+      this.apiCallLogInterval = null;
+    }
+    if (this.apiCallTimestamps.length > 0) {
+      this.log?.(`[rate-monitor] Session total API calls: ${this.apiCallTimestamps.length}`);
+    }
+  }
+
+  private recordApiCall(): void {
+    this.apiCallTimestamps.push(Date.now());
+    this.lastApiCallTime = Date.now();
+  }
 
   private async enforceApiRateLimit(): Promise<void> {
-    if (this.apiMutex) {
-      await this.apiMutex;
+    // Chain onto the existing mutex — guarantees true serialization
+    let release!: () => void;
+    const next = this.apiMutex.then(() => new Promise<void>((r) => { release = r; }));
+    this.apiMutex = next;
+    await next; // Wait for all previous callers to finish + our turn to start
+
+    // Now we're the ONLY caller executing
+    const elapsed = Date.now() - this.lastApiCallTime;
+    if (elapsed < CARD_API_MIN_INTERVAL_MS) {
+      await new Promise((r) => setTimeout(r, CARD_API_MIN_INTERVAL_MS - elapsed));
     }
-    this.apiMutex = new Promise<void>(async (resolve) => {
-      const elapsed = Date.now() - this.lastApiCallTime;
-      if (elapsed < CARD_API_MIN_INTERVAL_MS) {
-        await new Promise((r) => setTimeout(r, CARD_API_MIN_INTERVAL_MS - elapsed));
-      }
-      this.lastApiCallTime = Date.now();
-      resolve();
-    });
-    await this.apiMutex;
-    this.apiMutex = null;
+    this.recordApiCall();
+    release(); // Let the next caller in the chain proceed
   }
 
   private canMakeApiCall(): boolean {
@@ -667,7 +706,7 @@ if (!this.state || this.closed) return;
   }
 
   private markApiCall(): void {
-    this.lastApiCallTime = Date.now();
+    this.recordApiCall();
   }
 
   /** Track a fire-and-forget request so close() can drain it before finalising. */
