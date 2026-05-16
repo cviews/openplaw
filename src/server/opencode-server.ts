@@ -100,25 +100,80 @@ export class OpencodeServerManager {
   private config: OpencodeServerConfig;
   private url: string = "";
   private running = false;
+  private intentionalStop = false;
+  private restartBackoffMs = 1_000;
+  private maxRestartBackoffMs = 30_000;
+  private restartCount = 0;
+  private maxRestarts = 5;
 
   constructor(config: OpencodeServerConfig) {
     this.config = config;
   }
 
-  async start(): Promise<OpencodeServerResult> {
+async start(): Promise<OpencodeServerResult> {
     const port = this.config.port ?? DEFAULT_OPENCODE_PORT;
     const hostname = this.config.hostname ?? DEFAULT_HOSTNAME;
     this.url = `http://${hostname}:${port}`;
 
     await this.cleanupOrphanedServer(port, hostname);
 
+    const { client } = await this.startInternal(port, hostname);
+
+    this.client = client;
+    this.running = true;
+    logger.info(`opencode server started at ${this.url}`);
+
+    return {
+      url: this.url,
+      port,
+      client: this.client,
+      stop: () => this.stop(),
+    };
+  }
+
+  async stop(): Promise<void> {
+    this.intentionalStop = true;
+    if (this.childProcess && !this.childProcess.killed) {
+      this.childProcess.kill("SIGTERM");
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(() => {
+          if (this.childProcess && !this.childProcess.killed) {
+            this.childProcess.kill("SIGKILL");
+          }
+          resolve();
+        }, 10_000);
+        this.childProcess?.on("exit", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
+    }
+    deletePidFile();
+    this.running = false;
+    this.childProcess = null;
+    this.client = null;
+  }
+
+  private async restart(): Promise<void> {
+    if (this.intentionalStop) return;
+    try {
+      const port = this.config.port ?? DEFAULT_OPENCODE_PORT;
+      const hostname = this.config.hostname ?? DEFAULT_HOSTNAME;
+      await this.cleanupOrphanedServer(port, hostname);
+      const result = await this.startInternal(port, hostname);
+      this.client = result.client;
+      this.running = true;
+      logger.info(`opencode server auto-restarted successfully at ${this.url} (attempt ${this.restartCount})`);
+    } catch (err) {
+      logger.error(`opencode server auto-restart failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private async startInternal(port: number, hostname: string): Promise<{ client: OpencodeClient }> {
     ensureOpencodeInPath();
-
     const configDir = resolveConfigDir();
-
     const packageRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
     const serverStartScript = path.resolve(packageRoot, "dist/server/server-start.js");
-
     const configContent = JSON.stringify(this.config.config);
 
     this.childProcess = child_process.spawn("node", [serverStartScript], {
@@ -145,6 +200,16 @@ export class OpencodeServerManager {
       this.running = false;
       this.childProcess = null;
       deletePidFile();
+
+      if (!this.intentionalStop && this.restartCount < this.maxRestarts) {
+        this.restartCount++;
+        const delay = this.restartBackoffMs;
+        this.restartBackoffMs = Math.min(this.restartBackoffMs * 2, this.maxRestartBackoffMs);
+        logger.info(`opencode server crashed — auto-restarting in ${delay}ms (attempt ${this.restartCount}/${this.maxRestarts})`);
+        setTimeout(() => void this.restart(), delay);
+      } else if (!this.intentionalStop) {
+        logger.error(`opencode server crashed ${this.restartCount} times — giving up auto-restart`);
+      }
     });
 
     const pid = this.childProcess.pid;
@@ -154,41 +219,8 @@ export class OpencodeServerManager {
 
     await this.waitForReady(port, hostname);
 
-    this.client = createV2OpencodeClient({
-      baseUrl: this.url,
-    }) as unknown as OpencodeClient;
-
-    this.running = true;
-    logger.info(`opencode server started at ${this.url}`);
-
-    return {
-      url: this.url,
-      port,
-      client: this.client,
-      stop: () => this.stop(),
-    };
-  }
-
-  async stop(): Promise<void> {
-    if (this.childProcess && !this.childProcess.killed) {
-      this.childProcess.kill("SIGTERM");
-      await new Promise<void>((resolve) => {
-        const timeout = setTimeout(() => {
-          if (this.childProcess && !this.childProcess.killed) {
-            this.childProcess.kill("SIGKILL");
-          }
-          resolve();
-        }, 10_000);
-        this.childProcess?.on("exit", () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-      });
-    }
-    deletePidFile();
-    this.running = false;
-    this.childProcess = null;
-    this.client = null;
+    const client = createV2OpencodeClient({ baseUrl: this.url }) as unknown as OpencodeClient;
+    return { client };
   }
 
   getClient(): OpencodeClient | null {
