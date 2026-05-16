@@ -1,6 +1,6 @@
 {
   "name": "@openplaw/openplaw",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Feishu/DingTalk bot management platform with visible cross-bot routing, custom agent auto-discovery, runtime schema patching, and autonomous execution - built on opencode + omo",
   "type": "module",
   "main": "dist/index.js",
