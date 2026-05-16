@@ -53,7 +53,7 @@ export function createVisibilityHandlers(deps: {
 
   const before = async (input: BeforeInput, output: BeforeOutput): Promise<void> => {
     try {
-      if (input.tool !== "call_omo_agent") return;
+      if (input.tool !== "call_omo_agent" && input.tool !== "route_to_bot") return;
 
       const agentKey = resolveAgentName(input.tool, output.args);
       if (!agentKey) return;
@@ -80,7 +80,7 @@ export function createVisibilityHandlers(deps: {
 
   const after = async (input: AfterInput, output: AfterOutput): Promise<void> => {
     try {
-      if (input.tool !== "call_omo_agent") return;
+      if (input.tool !== "call_omo_agent" && input.tool !== "route_to_bot") return;
 
       const args = (output.metadata?.args as Record<string, unknown> | undefined) ?? {};
       const agentKey = resolveAgentName(input.tool, args);

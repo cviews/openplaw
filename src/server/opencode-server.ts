@@ -4,10 +4,74 @@ import {
 } from "@opencode-ai/sdk";
 import { createOpencodeClient as createV2OpencodeClient } from "@opencode-ai/sdk/v2";
 import * as child_process from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { resolveConfigDir } from "../config/loader.js";
 import { ensureOpencodeInPath } from "../utils/path.js";
 import { logger } from "../infra/logger.js";
+
+const PID_FILENAME = "opencode-server.pid";
+
+function pidFilePath(): string {
+  return path.join(resolveConfigDir(), PID_FILENAME);
+}
+
+function writePidFile(pid: number): void {
+  try {
+    const dir = resolveConfigDir();
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(pidFilePath(), String(pid), "utf-8");
+  } catch (err) {
+    logger.debug(`Failed to write PID file: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function readPidFile(): number | null {
+  try {
+    const content = fs.readFileSync(pidFilePath(), "utf-8").trim();
+    const pid = parseInt(content, 10);
+    return Number.isFinite(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function deletePidFile(): void {
+  try {
+    fs.unlinkSync(pidFilePath());
+  } catch {
+    // File may not exist, ignore
+  }
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Find PID of the process listening on a given port (macOS / Linux).
+ * Returns null if no process found or command unavailable.
+ */
+function findProcessOnPort(port: number): number | null {
+  try {
+    const output = child_process.execSync(`lsof -i :${port} -t -sTCP:LISTEN`, {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const lines = output.trim().split("\n").filter(Boolean);
+    const pid = parseInt(lines[0]!, 10);
+    return Number.isFinite(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
 
 export type OpencodeServerConfig = {
   /** Port for opencode server HTTP API */
@@ -28,7 +92,7 @@ export type OpencodeServerResult = {
 };
 
 const DEFAULT_OPENCODE_PORT = 4096;
-const DEFAULT_HOSTNAME = "localhost";
+const DEFAULT_HOSTNAME = "127.0.0.1";
 
 export class OpencodeServerManager {
   private childProcess: child_process.ChildProcess | null = null;
@@ -46,12 +110,12 @@ export class OpencodeServerManager {
     const hostname = this.config.hostname ?? DEFAULT_HOSTNAME;
     this.url = `http://${hostname}:${port}`;
 
+    await this.cleanupOrphanedServer(port, hostname);
+
     ensureOpencodeInPath();
 
     const configDir = resolveConfigDir();
 
-    // The child process calls createOpencodeServer internally
-    // Resolve from package root so it works both from dist/ (production) and src/ (tsx dev)
     const packageRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
     const serverStartScript = path.resolve(packageRoot, "dist/server/server-start.js");
 
@@ -80,7 +144,13 @@ export class OpencodeServerManager {
       logger.info(`opencode server process exited with code ${code}`);
       this.running = false;
       this.childProcess = null;
+      deletePidFile();
     });
+
+    const pid = this.childProcess.pid;
+    if (pid) {
+      writePidFile(pid);
+    }
 
     await this.waitForReady(port, hostname);
 
@@ -115,6 +185,7 @@ export class OpencodeServerManager {
         });
       });
     }
+    deletePidFile();
     this.running = false;
     this.childProcess = null;
     this.client = null;
@@ -140,7 +211,6 @@ export class OpencodeServerManager {
   ): Promise<void> {
     for (let i = 0; i < maxRetries; i++) {
       try {
-        // Any response (even 404) means the HTTP server is up and accepting connections
         const response = await fetch(`http://${hostname}:${port}/`);
         if (response.ok || response.status === 404) {
           logger.info("opencode server is ready");
@@ -154,5 +224,60 @@ export class OpencodeServerManager {
     throw new Error(
       `opencode server did not become ready within ${maxRetries * intervalMs}ms`,
     );
+  }
+
+  private async cleanupOrphanedServer(port: number, hostname: string): Promise<void> {
+    const savedPid = readPidFile();
+    const hadPidFile = savedPid !== null;
+
+    if (savedPid !== null && isProcessRunning(savedPid)) {
+      logger.info(`Found orphaned opencode server (PID ${savedPid}), terminating it`);
+      try {
+        process.kill(savedPid, "SIGTERM");
+      } catch {
+        // already dead
+      }
+      await this.waitForProcessExit(savedPid, 5000);
+    }
+
+    deletePidFile();
+
+    if (!hadPidFile) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`http://${hostname}:${port}/`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      // Port still occupied after PID-based cleanup — PID may have been recycled
+      const portPid = findProcessOnPort(port);
+      if (portPid !== null && portPid !== process.pid) {
+        logger.warn(`Port ${port} still occupied by PID ${portPid}, force-killing`);
+        try {
+          process.kill(portPid, "SIGKILL");
+        } catch {
+          // already dead
+        }
+        await this.waitForProcessExit(portPid, 3000);
+      }
+    } catch (fetchErr) {
+      // fetch failed → port is free, good
+    }
+  }
+
+  private async waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (!isProcessRunning(pid)) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // already exited
+    }
   }
 }

@@ -332,7 +332,7 @@ export class FeishuStreamingSession {
     }
   }
 
-  private async updateNoteContent(note: string): Promise<void> {
+  public async updateNoteContent(note: string): Promise<void> {
     if (!this.state) return;
 
     this.state.sequence += 1;
@@ -353,6 +353,34 @@ export class FeishuStreamingSession {
         }),
       },
     ).catch((e: unknown) => this.log?.(`Note update failed: ${String(e)}`));
+  }
+
+  public async updateHeader(title: string, template: string = "blue"): Promise<void> {
+    if (!this.state) return;
+
+    this.state.sequence += 1;
+    const token = await getTenantToken(this.creds);
+
+    await fetch(
+      `https://open.feishu.cn/open-apis/cardkit/v1/cards/${this.state.cardId}/settings`,
+      {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify({
+          settings: JSON.stringify({
+            header: {
+              title: { tag: "plain_text", content: title },
+              template,
+            },
+          }),
+          sequence: this.state.sequence,
+          uuid: `h_${this.state.cardId}_${this.state.sequence}`,
+        }),
+      },
+    ).catch((e: unknown) => this.log?.(`Header update failed: ${String(e)}`));
   }
 
   private clearFlushTimer(): void {

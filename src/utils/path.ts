@@ -31,12 +31,12 @@ export function expandTildePath(p: string): string {
 }
 
 /**
- * Resolve the directory containing the `opencode` binary from @openplaw/opencode.
+ * Resolve the directory containing the `opencode` binary from opencode-ai.
  * Returns null if the package is not installed.
  */
 export function resolveOpencodeBinDir(): string | null {
   try {
-    const pkgJsonPath = require.resolve("@openplaw/opencode/package.json");
+    const pkgJsonPath = require.resolve("opencode-ai/package.json");
     return path.join(path.dirname(pkgJsonPath), "bin");
   } catch {
     return null;
@@ -44,7 +44,7 @@ export function resolveOpencodeBinDir(): string | null {
 }
 
 /**
- * Ensure the `opencode` binary from @openplaw/opencode is on PATH,
+ * Ensure the `opencode` binary from opencode-ai is on PATH,
  * so that @opencode-ai/sdk's cross-spawn('opencode', ...) can find it.
  * Idempotent — safe to call multiple times.
  */

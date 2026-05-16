@@ -127,6 +127,8 @@ export async function promoteGlobalPreferences(projectDir: string): Promise<void
   }
 }
 
+const INSTRUCTIONS_FILE = "INSTRUCTIONS.md";
+
 const MEMORY_WRITE_PROMPT_TEMPLATE =
   `When you detect stable user preferences, decisions, or important information, write them to the project's .openplaw/MEMORY.md file.
 Use section markers to distinguish scope:
@@ -138,11 +140,11 @@ Use section markers to distinguish scope:
 - ## [Global Preferences]: 跨所有项目通用的偏好（语言、风格、习惯）。这些会自动提升到全局记忆文件。
 - ## [Project Preferences]: 仅与本项目相关的偏好（框架、架构、配置路径）。这些留在项目文件中。`;
 
-export function buildMemoryInstructions(memory: MemoryContent, projectDir?: string): string[] {
-  const instructions: string[] = [];
+export async function buildMemoryInstructionsFile(memory: MemoryContent, projectDir?: string): Promise<string> {
+  const parts: string[] = [];
 
   if (memory.combined) {
-    instructions.push(`[Cross-Session Memory / 跨会话记忆 - MEMORY.md]:\n${memory.combined}`);
+    parts.push(`[Cross-Session Memory / 跨会话记忆 - MEMORY.md]:\n${memory.combined}`);
   }
 
   const prompt = projectDir
@@ -155,7 +157,14 @@ export function buildMemoryInstructions(memory: MemoryContent, projectDir?: stri
       )
     : MEMORY_WRITE_PROMPT_TEMPLATE;
 
-  instructions.push(prompt);
+  parts.push(prompt);
 
-  return instructions;
+  const content = parts.join("\n\n");
+
+  const openplawDir = resolveOpenmoDir();
+  const instructionsPath = path.join(openplawDir, INSTRUCTIONS_FILE);
+  await atomicWrite(instructionsPath, `${content}\n`);
+  logger.debug("Wrote memory instructions file", { path: instructionsPath });
+
+  return instructionsPath;
 }

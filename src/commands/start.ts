@@ -12,7 +12,7 @@ import { injectProjectSkillsIntoOpencodeConfig, injectProjectMcpIntoOpencodeConf
 import type { SkillInfo, GlobalSkillInfo, ProjectMcpEntry } from "../config/project-loader.js";
 import { scanCustomAgents, injectCustomAgentsIntoOpencodeConfig, readOmoAgentOverrides } from "../config/agent-loader.js";
 import { expandTildePath, ensureOpencodeInPath } from "../utils/path.js";
-import { readMemoryFiles, buildMemoryInstructions, type MemoryContent } from "../config/memory-reader.js";
+import { readMemoryFiles, buildMemoryInstructionsFile, type MemoryContent } from "../config/memory-reader.js";
 
 export type StartCommandOptions = {
   healthPort?: number;
@@ -110,10 +110,8 @@ export async function startCommand(options?: StartCommandOptions): Promise<void>
     }),
     { global: "", project: "", combined: "" },
   );
-  const memoryInstructions = buildMemoryInstructions(combinedMemory, projectDirs.length === 1 ? projectDirs[0] : undefined);
-  if (memoryInstructions.length > 0) {
-    enrichedConfig.instructions = [...(enrichedConfig.instructions ?? []), ...memoryInstructions];
-  }
+  const instructionsFilePath = await buildMemoryInstructionsFile(combinedMemory, projectDirs.length === 1 ? projectDirs[0] : undefined);
+  enrichedConfig.instructions = [...(enrichedConfig.instructions ?? []), instructionsFilePath];
 
   const opencodeConfig = enrichedConfig as Config;
 

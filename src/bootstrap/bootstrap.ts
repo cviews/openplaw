@@ -35,6 +35,7 @@ import { adaptToMcpServerConfig } from "../mcp/external/mcp-adapter.js";
 import { ResourceManager } from "../resource/index.js";
 import { AgentNameResolver } from "./agent-name-resolver.js";
 import { resolveConfigDir } from "../config/loader.js";
+import { readLatestModelFromConfig } from "../utils/model.js";
 import {
   DEFAULT_GATEWAY_PORT,
   DEFAULT_GATEWAY_HOST,
@@ -191,6 +192,7 @@ export async function createOpenmoBootstrap(config: BootstrapConfig): Promise<Bo
       client: config.opencodeClient,
       getDefaultAgent: () => resolvedDefaultAgent,
       agentNameResolver,
+      getLatestModel: readLatestModelFromConfig,
     });
     logger.info("Hub trigger tools registered");
 

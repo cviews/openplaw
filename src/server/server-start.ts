@@ -25,14 +25,18 @@ async function main(): Promise<void> {
 
   process.stderr.write(`opencode server started at ${url}\n`);
 
-  const shutdown = () => {
+  const shutdown = async () => {
     process.stderr.write("opencode server shutting down...\n");
-    close();
+    try {
+      await close();
+    } catch (err) {
+      process.stderr.write(`shutdown error: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
     process.exit(0);
   };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 }
 
 main().catch((err) => {

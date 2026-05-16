@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { logger } from "../../infra/logger.js";
 import type { AgentNameResolver } from "../../bootstrap/agent-name-resolver.js";
+import type { ModelRef } from "../../utils/model.js";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 300_000;
 const POLL_INTERVAL_MS = 2_000;
@@ -13,6 +14,7 @@ export function registerHubTriggerTools(
     client: OpencodeClient;
     getDefaultAgent: () => string;
     agentNameResolver: AgentNameResolver;
+    getLatestModel?: () => Promise<ModelRef | null>;
   },
 ): void {
   const { client, getDefaultAgent, agentNameResolver } = deps;
@@ -89,6 +91,17 @@ export function registerHubTriggerTools(
           parts: [{ type: "text" as const, text: message }],
         };
         if (directory) promptArgs.directory = directory;
+
+        try {
+          const latestModel = await deps.getLatestModel?.();
+          if (latestModel) {
+            promptArgs.model = latestModel;
+            logger.info(`trigger_agent: using latest model from config: ${latestModel.providerID}/${latestModel.modelID}`);
+          }
+        } catch (err) {
+          logger.warn(`trigger_agent: failed to read latest model config: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
         const promptResult = await client.session.promptAsync(promptArgs as any);
 
         if (promptResult.error) {

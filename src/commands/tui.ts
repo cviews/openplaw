@@ -13,7 +13,7 @@ import { resolveOpenmoDir, resolveConfigDir } from "../config/loader.js";
 import { resolveConfig } from "../config/config.js";
 import type { OpenmoPluginConfig } from "../config/config.js";
 import { expandTildePath, ensureOpencodeInPath } from "../utils/path.js";
-import { readMemoryFiles, buildMemoryInstructions } from "../config/memory-reader.js";
+import { readMemoryFiles, buildMemoryInstructionsFile } from "../config/memory-reader.js";
 import path from "node:path";
 
 export type TuiCommandOptions = {
@@ -129,10 +129,8 @@ export async function tuiCommand(options?: TuiCommandOptions): Promise<void> {
   enrichedConfig = injectCustomAgentsIntoOpencodeConfig(enrichedConfig, customAgents, omoOverrides);
 
   const memory = await readMemoryFiles(projectPath);
-  const memoryInstructions = buildMemoryInstructions(memory, projectPath);
-  if (memoryInstructions.length > 0) {
-    enrichedConfig.instructions = [...(enrichedConfig.instructions ?? []), ...memoryInstructions];
-  }
+  const instructionsFilePath = await buildMemoryInstructionsFile(memory, projectPath);
+  enrichedConfig.instructions = [...(enrichedConfig.instructions ?? []), instructionsFilePath];
 
   const injected = await injectConfig(configs, { ...merged, opencodeConfig: enrichedConfig });
 
