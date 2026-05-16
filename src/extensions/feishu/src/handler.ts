@@ -436,7 +436,10 @@ class ThinkingTracker {
 
 // ─── Subtask / Tool Part Detection ───────────────────────────────────
 
-function handleToolPartUpdate(part: { tool?: string; state?: { status?: string; metadata?: Record<string, unknown>; input?: Record<string, unknown>; error?: string; title?: string } }, phase: PhaseTracker): void {
+function handleToolPartUpdate(
+  part: { tool?: string; state?: { status?: string; metadata?: Record<string, unknown>; input?: Record<string, unknown>; error?: string; title?: string }; metadata?: Record<string, unknown> },
+  phase: PhaseTracker,
+): void {
   const toolName = part.tool;
   const isDelegationTool =
     toolName === "route_to_bot" || toolName === "call_omo_agent" || toolName === "task";
@@ -450,17 +453,31 @@ function handleToolPartUpdate(part: { tool?: string; state?: { status?: string; 
   const titleMatch = (state.title ?? "").match(/委派\s*(\S+)\s*处理/);
   const agentName = String(target ?? titleMatch?.[1] ?? "unknown");
 
+  // Check background flag from multiple locations:
+  // - part.metadata (ToolPart top-level) — OpenCode puts ctx.metadata() here
+  // - state.metadata (ToolStateCompleted.metadata) — required field for completed state
+  // - state.input — the tool call's original input parameters
+  const partMetadata = part.metadata ?? {};
+  const stateMetadata = state.metadata ?? {};
+  const stateInput = (state.input as Record<string, unknown>) ?? {};
   const isBackground =
-    (state.metadata?.background as boolean) ?? (state.input as Record<string, unknown>)?.background as boolean ?? false;
+    (partMetadata.background as boolean | undefined) ?? (stateMetadata.background as boolean | undefined) ?? (stateInput.background as boolean | undefined) ?? false;
 
   if (status === "running") phase.addPending(agentName);
-  if (status === "completed" && !isBackground) phase.markCompletedByName(agentName);
-  if (status === "completed" && isBackground) {
+
+  // Key insight: ALL delegation tools (task, route_to_bot, call_omo_agent) spawn child work
+  // that may continue running AFTER the tool call completes. Even foreground task calls block
+  // the parent turn, but the child agent still produces events. For route_to_bot/call_omo_agent,
+  // there is NO background flag — they're openplaw plugins, not OpenCode built-in — but
+  // wait_for_result=false means async execution similar to background.
+  // Therefore: when ANY delegation tool completes, NEVER mark it completed immediately.
+  // Always keep it as pending until the parent session truly finishes (phase.allDone()).
+  if (status === "completed") {
     if (!phase.hasPendingWithName(agentName)) {
       phase.addPending(agentName);
-      logger.info(`[feishu-streaming] Background task completed but no pending entry yet, added ${agentName} as pending`);
+      logger.info(`[feishu-streaming] Delegation tool completed but no pending entry yet, added ${agentName} as pending`);
     }
-    logger.info(`[feishu-streaming] Background task tool completed (started child agent), keeping ${agentName} as pending until child results arrive`);
+    logger.info(`[feishu-streaming] Delegation tool ${toolName} completed (isBackground=${isBackground}), keeping ${agentName} as pending until child results arrive`);
   }
   if (status === "error") phase.markFailedByName(agentName, state.error ?? "unknown error");
 }
@@ -761,7 +778,6 @@ const thinkingHeartbeat = setInterval(() => {
 
         let iteratorResult: IteratorResult<unknown>;
         if (!sseFirstEventReceived) {
-          // Race first event against initial timeout — prevents infinite wait when SSE stream is empty
           let timeoutId: ReturnType<typeof setTimeout> | undefined;
           const timeoutPromise = new Promise<IteratorResult<never>>((resolve) => {
             timeoutId = setTimeout(() => {
@@ -933,7 +949,7 @@ const thinkingHeartbeat = setInterval(() => {
             }
 
 if (part.type === "tool") {
-              handleToolPartUpdate(part as { tool?: string; state?: { status?: string; metadata?: Record<string, unknown>; input?: Record<string, unknown>; error?: string; title?: string } }, phase);
+              handleToolPartUpdate(part as { tool?: string; state?: { status?: string; metadata?: Record<string, unknown>; input?: Record<string, unknown>; error?: string; title?: string }; metadata?: Record<string, unknown> }, phase);
 
               const toolState = (part.state as { status?: string; title?: string }) ?? {};
               const toolName = (part.tool as string) ?? "";
@@ -991,6 +1007,11 @@ if (part.type === "tool") {
 
             if (part.type === "subtask" && part.agent) {
               phase.addPending(String(part.agent));
+              logger.info(`[feishu-streaming] SSE subtask part: agent=${part.agent}`);
+            }
+            if (part.type === "agent" && (part as Record<string, unknown>).name) {
+              phase.addPending(String((part as Record<string, unknown>).name));
+              logger.info(`[feishu-streaming] SSE agent part: name=${(part as Record<string, unknown>).name}`);
             }
             break;
           }
@@ -1077,8 +1098,7 @@ if (part.type === "tool") {
               } else if (phase.isDelegating()) {
                 logger.info(`[feishu-streaming] SSE session idle while delegating subtasks, not closing yet`);
               } else {
-                logger.info(`[feishu-streaming] SSE session idle, closing: sessionId=${sessionId}`);
-                sessionDone = true;
+                logger.info(`[feishu-streaming] SSE session idle, will verify on next event cycle`);
                 sessionIdle = true;
               }
             }
@@ -1134,6 +1154,24 @@ if (part.type === "tool") {
             break;
           }
         }
+
+        // ── Post-processing: event-driven completion check ─────────────
+        // Close ONLY here — never on session.idle alone.
+        // If PhaseTracker hasn't seen subtask events yet (race condition),
+        // the next SSE event will update it and phase.isDelegating()=true prevents closing.
+        if (sessionIdle && !phase.isDelegating() && !isCompacting) {
+          if (phase.allDone()) {
+            logger.info(`[feishu-streaming] Event-driven close: all subtasks done (total=${phase.getTotal()}, completed=${phase.getCompletedCount()}), session was idle`);
+            sessionDone = true;
+            break;
+          }
+          if (phase.getTotal() === 0 && sseProducedText) {
+            logger.info(`[feishu-streaming] Event-driven close: no subtasks + text produced, session was idle`);
+            sessionDone = true;
+            break;
+          }
+          logger.info(`[feishu-streaming] sessionIdle=true but phase incomplete (total=${phase.getTotal()}, delegating=${phase.isDelegating()}), continuing SSE loop for more events`);
+        }
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -1150,9 +1188,8 @@ if (part.type === "tool") {
       clearInterval(thinkingHeartbeat);
     }
 
-    if ((!sseProducedText && !sessionIdle) || (phase.isDelegating() && !sessionDone)) {
-      const reason = !sseProducedText && !sessionIdle ? "SSE did not produce content" : "subtasks still running after SSE ended";
-      logger.info(`[feishu-streaming] Falling back to polling for session ${sessionId}: ${reason}, phase.total=${phase.getTotal()}, phase.pending=${JSON.stringify(phase.getPendingNames())}`);
+    if (!sseProducedText && !sessionIdle) {
+      logger.info(`[feishu-streaming] SSE did not produce content, falling back to polling for session ${sessionId}`);
 
       const POLL_FAST_MS = 300;
       const POLL_SLOW_MS = 1_500;
@@ -1216,7 +1253,7 @@ if (part.type === "tool") {
               phase.addPending(part.agent ?? "unknown");
             }
             if (part.type === "tool") {
-              handleToolPartUpdate(part as { tool?: string; state?: { status?: string; metadata?: Record<string, unknown>; input?: Record<string, unknown>; error?: string; title?: string } }, phase);
+              handleToolPartUpdate(part as { tool?: string; state?: { status?: string; metadata?: Record<string, unknown>; input?: Record<string, unknown>; error?: string; title?: string }; metadata?: Record<string, unknown> }, phase);
             }
           }
         }
