@@ -26,3 +26,19 @@ github-search-results.md
 # Logs
 *.log
 logs/
+
+# Sensitive files — prevent accidental credential leaks
+.env*
+!.env.example
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.cert
+*.crt
+credentials/
+client_secret_*.json
+secrets.*

@@ -76,7 +76,7 @@ export async function tuiCommand(options?: TuiCommandOptions): Promise<void> {
 
   const merged = mergeConfig(configs);
 
-  const hubUrl = options?.hubUrl ?? `http://localhost:4097`;
+  const hubUrl = options?.hubUrl ?? process.env["OPENPLAW_HUB_URL"] ?? `http://localhost:4097`;
 
   const serverResources = await pullResourcesFromServer(hubUrl, projectPath);
 
