@@ -863,6 +863,9 @@ const thinkingHeartbeat = setInterval(() => {
 
         if (iteratorResult.done) {
           logger.info(`[feishu-streaming] SSE stream ended (iteratorResult.done), sessionDone=${sessionDone}, sessionIdle=${sessionIdle}, sseProducedText=${sseProducedText}, phase.isDelegating=${phase.isDelegating()}, phase.total=${phase.getTotal()}, accumulatedText.length=${accumulatedText.length}`);
+          if (sseProducedText && !phase.isDelegating()) {
+            streaming.updateLoadingContent("");
+          }
           if (phase.isDelegating()) {
             logger.info(`[feishu-streaming] SSE stream ended while background tasks still running, transitioning to polling for completion`);
             sessionIdle = true;
@@ -884,7 +887,7 @@ const thinkingHeartbeat = setInterval(() => {
         const payloadSessionId = (props.sessionID as string | undefined) ?? (payload.sessionID as string | undefined);
         logger.debug(`[feishu-streaming] SSE raw event: type=${payloadType ?? 'unknown'}, sessionID=${payloadSessionId ?? 'none'}, keys=${Object.keys(payload).join(',')}, elapsed=${Date.now() - sseStart}ms`);
 
-        if (directory && event.directory !== directory) {
+        if (directory && event.directory !== undefined && event.directory !== directory) {
           logger.debug(`[feishu-streaming] SSE event filtered by directory: eventDir=${event.directory ?? 'none'}, expectedDir=${directory}`);
           continue;
         }
@@ -1297,11 +1300,18 @@ if (part.type === "tool") {
         if (sessionIdle && !phase.isDelegating() && !isCompacting) {
           if (phase.allDone()) {
             logger.info(`[feishu-streaming] Event-driven close: all subtasks done (total=${phase.getTotal()}, completed=${phase.getCompletedCount()}), session was idle`);
+            streaming.updateLoadingContent("");
             sessionDone = true;
             break;
           }
-          if (phase.getTotal() === 0 && sseProducedText) {
-            logger.info(`[feishu-streaming] SSE session idle (no subtasks tracked), continuing SSE loop — main agent may still be working`);
+          if (sseProducedText) {
+            logger.info(`[feishu-streaming] Event-driven close: session idle with content produced (no subtasks tracked, total=${phase.getTotal()})`);
+            streaming.updateLoadingContent("");
+            sessionDone = true;
+            break;
+          }
+          if (phase.getTotal() === 0) {
+            logger.info(`[feishu-streaming] SSE session idle but no content yet, continuing SSE loop for text or error`);
           } else {
             logger.info(`[feishu-streaming] sessionIdle=true but phase incomplete (total=${phase.getTotal()}, delegating=${phase.isDelegating()}), continuing SSE loop for more events`);
           }
