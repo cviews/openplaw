@@ -86,7 +86,11 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
         process.exit(1);
       }
     } else if (!arg.startsWith("-")) {
-      result.command = arg;
+      if (!result.command) {
+        result.command = arg;
+      } else if (!result.subcommand) {
+        result.subcommand = arg;
+      }
       i++;
     } else {
       console.error(`Unknown option: ${arg}`);
@@ -166,11 +170,7 @@ export async function runCli(argv: string[] = process.argv): Promise<void> {
       break;
     }
     case "daemon": {
-      const daemonSubcommand = argv.find((arg, idx) => {
-        if (idx <= 2) return false;
-        const prev = argv[idx - 1];
-        return prev === "daemon" && !arg.startsWith("-");
-      });
+      const daemonSubcommand = typeof args.subcommand === "string" ? args.subcommand : undefined;
       if (!daemonSubcommand) {
         console.log(`Usage: openplaw daemon <status|install|uninstall|start|stop|restart>`);
         process.exit(1);
