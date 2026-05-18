@@ -114,9 +114,65 @@ export function createLaunchdService(): GatewayService {
     },
 
     async stop(): Promise<void> {
-      if (existsSync(PLIST_PATH)) {
-        execLaunchctl("unload", PLIST_PATH);
+      // Kill the process tree before unloading to ensure opencode subprocess is cleaned up
+      try {
+        const output = execSync(`launchctl list ${LABEL}`, {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        const pidMatch = output.match(/"PID"\s*=\s*(\d+)/);
+        if (pidMatch?.[1]) {
+          const pid = parseInt(pidMatch[1], 10);
+          if (Number.isFinite(pid)) {
+            // Recursively find and kill all descendant processes
+            try {
+              const children = execSync(`pgrep -P ${pid}`, {
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+              }).trim().split("\n").filter(Boolean);
+              for (const childPid of children) {
+                try {
+                  // Kill grandchildren first
+                  execSync(`pkill -P ${childPid}`, { stdio: ["pipe", "pipe", "pipe"] });
+                } catch { /* no grandchildren */ }
+                try {
+                  process.kill(parseInt(childPid, 10), "SIGTERM");
+                } catch { /* already dead */ }
+              }
+            } catch { /* no children */ }
+            try {
+              process.kill(pid, "SIGTERM");
+            } catch { /* already dead */ }
+          }
+        }
+      } catch {
+        // Service not loaded
       }
+      if (existsSync(PLIST_PATH)) {
+        try {
+          execLaunchctl("unload", PLIST_PATH);
+        } catch {
+          // May not be loaded
+        }
+      }
+      // Fallback: kill any process still on the opencode port
+      let opencodePort = 4096;
+      try {
+        const configPath = join(resolveOpenmoDir(), "..", "openplaw", "openplaw.json");
+        const config = JSON.parse(readFileSync(configPath, "utf-8"));
+        if (config?.ports?.opencode) opencodePort = config.ports.opencode;
+      } catch { /* use default */ }
+      try {
+        const portPid = execSync(`lsof -i :${opencodePort} -t -sTCP:LISTEN`, {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        }).trim();
+        if (portPid) {
+          for (const p of portPid.split("\n").filter(Boolean)) {
+            try { process.kill(parseInt(p, 10), "SIGKILL"); } catch { /* already dead */ }
+          }
+        }
+      } catch { /* port already free */ }
     },
 
     async restart(): Promise<GatewayServiceRestartResult> {
@@ -157,13 +213,13 @@ export function createLaunchdService(): GatewayService {
           });
           loaded = true;
 
-          const pidMatch = output.match(/PID\s*=\s*(\d+)/);
+          const pidMatch = output.match(/"PID"\s*=\s*(\d+)/);
           if (pidMatch?.[1]) {
             pid = parseInt(pidMatch[1], 10);
             running = Number.isFinite(pid);
           }
 
-          const exitMatch = output.match(/LastExitStatus\s*=\s*(\d+)/);
+          const exitMatch = output.match(/"LastExitStatus"\s*=\s*(\d+)/);
           if (exitMatch?.[1] && exitMatch[1] !== "0" && !pid) {
             running = false;
           }
