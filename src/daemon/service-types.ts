@@ -20,4 +20,6 @@ export type GatewayServiceStartResult =
   | { outcome: "scheduled"; state: GatewayServiceState }
   | { outcome: "missing-install"; state: GatewayServiceState };
 
-export type GatewayServiceRestartResult = { outcome: "completed" | "scheduled" };
+export type GatewayServiceRestartResult =
+  | { outcome: "completed" | "scheduled" }
+  | { outcome: "missing-install"; state: GatewayServiceState };

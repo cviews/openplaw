@@ -176,14 +176,12 @@ export function createLaunchdService(): GatewayService {
     },
 
     async restart(): Promise<GatewayServiceRestartResult> {
-      if (existsSync(PLIST_PATH)) {
-        try {
-          execLaunchctl("unload", PLIST_PATH);
-        } catch {
-          // May not be loaded
-        }
-        execLaunchctl("load", PLIST_PATH);
+      if (!existsSync(PLIST_PATH)) {
+        const state = await this.readState();
+        return { outcome: "missing-install", state };
       }
+      await this.stop();
+      execLaunchctl("load", PLIST_PATH);
       return { outcome: "completed" };
     },
 
