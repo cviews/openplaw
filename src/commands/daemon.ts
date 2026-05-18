@@ -17,7 +17,7 @@ export async function daemonCommand(subcommand: DaemonSubcommand): Promise<void>
     case "install": {
       await service.install({
         env: process.env as GatewayServiceEnv,
-        programArguments: [process.execPath, ...process.argv.slice(1), "start"],
+        programArguments: [process.execPath, process.argv[1]!, "start"],
       });
       logger.info("Daemon installed successfully");
       break;
